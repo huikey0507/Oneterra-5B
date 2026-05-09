@@ -14,3 +14,7 @@
 # Caption eval (Java/pycocoevalcap); do not upload
 **/pycocoevalcap/
 
+
+# Python cache
+__pycache__/
+*.pyc
