@@ -11,7 +11,7 @@ CONFIG="/mnt_llm_A100_V1/shui/LAE/RS-Xsam-main-old/xsam/xsam/configs/xsam/phi3_m
 DEFAULT_PTH_MODEL="/mnt_llm_A100_V1/shui/LAE/OneTerra-train/wkdrs_01/s3_mixed_fineture_base/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune_all_v1/pytorch_model.bin"
 # 获取参数（checkpoint路径和输出目录都是可选的）
 PTH_MODEL="${1:-$DEFAULT_PTH_MODEL}"
-WORK_DIR="${2:-./eval_results_base_20260508/s3_mixed_finetune}"
+WORK_DIR="${2:-./eval_results_base_20260509/s3_mixed_finetune}"
 
 # 检查checkpoint是否存在
 if [ ! -f "$PTH_MODEL" ] && [ ! -d "$PTH_MODEL" ]; then

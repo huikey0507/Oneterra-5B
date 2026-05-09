@@ -1893,7 +1893,7 @@ val_evaluators = [
 ]
 
 # 临时只跑 refseg_rrsisd_test：其余评测集在这里统一过滤掉。
-_eval_target_data_name = "panoptic_genseg_pano_val"
+_eval_target_data_name = "refseg_rrsisd_test"
 val_datasets = [dataset for dataset in val_datasets if dataset.get("data_name") == _eval_target_data_name]
 val_evaluators = [evaluator for evaluator in val_evaluators if evaluator.get("data_name") == _eval_target_data_name]
 
