@@ -1,0 +1,339 @@
+import json
+import os
+import os.path as osp
+from typing import Optional, Dict, List
+
+from xsam.utils.logging import print_log
+
+from ..utils import comm
+from .base_seg_evaluator import BaseSegEvaluator
+
+try:
+    from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+    NLTK_AVAILABLE = True
+except ImportError:
+    NLTK_AVAILABLE = False
+    print_log("Warning: nltk not available, BLEU score will not be calculated", logger="current")
+
+try:
+    from rouge_score import rouge_scorer
+    ROUGE_AVAILABLE = True
+except ImportError:
+    ROUGE_AVAILABLE = False
+    print_log("Warning: rouge-score not available, ROUGE score will not be calculated", logger="current")
+
+
+class ImgConvEvaluator(BaseSegEvaluator):
+    """评估器用于imgconv（图像对话/VQA）任务。
+    
+    这个评估器计算BLEU和ROUGE指标，并保存LLM生成的对话输出。
+    """
+    
+    def __init__(
+        self,
+        data_name: str = "imgconv",
+        output_dir: Optional[str] = None,
+        distributed: bool = True,
+    ):
+        """
+        Args:
+            data_name: 数据集名称
+            output_dir: 输出目录，用于保存评估结果
+            distributed: 是否在分布式环境中运行
+        """
+        self._data_name = data_name
+        self._distributed = distributed
+        self._output_dir = output_dir
+        self._metadata = None
+        
+        if self._output_dir is not None:
+            os.makedirs(self._output_dir, exist_ok=True)
+        
+        # 初始化评估指标计算器
+        if ROUGE_AVAILABLE:
+            self.rouge_scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
+        else:
+            self.rouge_scorer = None
+        
+        if NLTK_AVAILABLE:
+            self.smoothing = SmoothingFunction().method1
+        else:
+            self.smoothing = None
+    
+    @property
+    def metadata(self):
+        return self._metadata
+    
+    @metadata.setter
+    def metadata(self, value):
+        self._metadata = value
+    
+    @property
+    def output_dir(self):
+        return self._output_dir
+    
+    @output_dir.setter
+    def output_dir(self, value):
+        self._output_dir = value
+        if self._output_dir is not None:
+            os.makedirs(self._output_dir, exist_ok=True)
+    
+    @property
+    def data_name(self):
+        return self._data_name
+    
+    def reset(self):
+        """重置评估器状态"""
+        self._predictions = []  # 存储预测答案
+        self._references = []   # 存储ground truth答案
+        self._questions = []    # 存储问题
+        self._image_files = []  # 存储图片文件路径
+    
+    def _extract_ground_truth(self, val_input: Dict) -> Optional[str]:
+        """从val_input中提取ground truth答案
+        
+        Args:
+            val_input: 包含conversations字段的字典
+            
+        Returns:
+            ground truth答案字符串，如果找不到则返回None
+        """
+        if not isinstance(val_input, dict):
+            return None
+        
+        # 尝试从conversations字段中提取答案
+        conversation = val_input.get("conversation", [])
+        if not conversation:
+            return None
+        
+        # 查找最后一个"from": "gpt"的消息作为ground truth答案
+        gt = conversation[-1]['output'].strip()
+        # for msg in reversed(conversations):
+        #     if isinstance(msg, dict) and msg.get("from") == "gpt":
+        #         return msg.get("value", "").strip()
+        
+        return gt
+    
+    def _tokenize(self, text: str) -> List[str]:
+        """简单的tokenization，将文本分割成单词列表"""
+        # 移除标点符号，转换为小写，分割
+        import re
+        text = re.sub(r'[^\w\s]', '', text.lower())
+        return text.split()
+    
+    def process(self, val_inputs, outputs):
+        """
+        处理输入和输出。
+        
+        对于imgconv任务，val_inputs包含图像信息和ground truth答案，
+        outputs应该包含LLM生成的预测答案。
+        
+        Args:
+            val_inputs: 输入数据（图像信息列表，包含conversations字段）
+            outputs: 模型输出（对于imgconv任务，可能为None，预测答案从LLM输出中获取）
+        """
+        # imgconv任务的outputs可能为None，因为这是对话任务，没有分割输出
+        # 预测答案和ground truth答案需要从其他地方获取
+        # 这里先记录val_inputs，实际的答案会在evaluate_dataset中处理
+        if isinstance(val_inputs, list) and len(val_inputs) > 0:
+            for val_input in val_inputs:
+                if isinstance(val_input, dict):
+                    # self._image_files.append(val_input.get("file_name", ""))
+                    # 提取ground truth答案
+                    gt_answer = self._extract_ground_truth(val_input)
+                    print_log(f"Extracted ground truth answer: {gt_answer}", logger="current")
+                    if gt_answer:
+                        self._references.append(gt_answer)
+                    else:
+                        self._references.append("")  # 如果没有ground truth，使用空字符串
+    
+    def add_prediction(self, prediction: str, question: str = "", image_file: str = ""):
+        """添加一个预测答案（从LLM输出中获取）
+        
+        Args:
+            prediction: 模型预测的答案
+            question: 问题文本
+            image_file: 图片文件路径
+        """
+        self._predictions.append(prediction)
+        self._questions.append(question)
+        self._image_files.append(image_file)
+            
+    
+    def _calculate_bleu(self, prediction: str, reference: str) -> float:
+        """计算BLEU分数"""
+        if not NLTK_AVAILABLE:
+            return 0.0
+        
+        pred_tokens = self._tokenize(prediction)
+        ref_tokens = self._tokenize(reference)
+        
+        if len(ref_tokens) == 0:
+            return 0.0
+        
+        try:
+            score = sentence_bleu(
+                [ref_tokens],
+                pred_tokens,
+                smoothing_function=self.smoothing
+            )
+            return score
+        except:
+            return 0.0
+    
+    def _calculate_rouge(self, prediction: str, reference: str) -> Dict[str, float]:
+        """计算ROUGE分数"""
+        if not ROUGE_AVAILABLE or self.rouge_scorer is None:
+            return {"rouge1": 0.0, "rouge2": 0.0, "rougeL": 0.0}
+        
+        try:
+            scores = self.rouge_scorer.score(reference, prediction)
+            return {
+                "rouge1": scores["rouge1"].fmeasure,
+                "rouge2": scores["rouge2"].fmeasure,
+                "rougeL": scores["rougeL"].fmeasure,
+            }
+        except:
+            return {"rouge1": 0.0, "rouge2": 0.0, "rougeL": 0.0}
+    
+    def evaluate(self):
+        """
+        执行评估，计算BLEU和ROUGE指标。
+        
+        Returns:
+            dict: 评估结果字典，包含BLEU和ROUGE分数
+        """
+        if len(self._predictions) == 0:
+            print_log("Warning: No predictions to evaluate", logger="current")
+            return {
+                "task": "imgconv",
+                "data_name": self._data_name,
+                "status": "no_predictions",
+            }
+        
+        if len(self._predictions) != len(self._references):
+            print_log(
+                f"Warning: Number of predictions ({len(self._predictions)}) "
+                f"does not match number of references ({len(self._references)})",
+                logger="current"
+            )
+            # 对齐长度
+            min_len = min(len(self._predictions), len(self._references))
+            self._predictions = self._predictions[:min_len]
+            self._references = self._references[:min_len]
+        
+        # 计算指标
+        bleu_scores = []
+        rouge1_scores = []
+        rouge2_scores = []
+        rougeL_scores = []
+        
+        for pred, ref in zip(self._predictions, self._references):
+            if ref:  # 只有当有ground truth时才计算指标
+                bleu = self._calculate_bleu(pred, ref)
+                bleu_scores.append(bleu)
+                
+                rouge = self._calculate_rouge(pred, ref)
+                rouge1_scores.append(rouge["rouge1"])
+                rouge2_scores.append(rouge["rouge2"])
+                rougeL_scores.append(rouge["rougeL"])
+        
+        # 计算平均分数
+        results = {
+            "task": "imgconv",
+            "data_name": self._data_name,
+            "num_samples": len(self._predictions),
+            "num_with_gt": len(bleu_scores),
+        }
+        
+        if bleu_scores:
+            results["bleu"] = sum(bleu_scores) / len(bleu_scores)
+            results["rouge1"] = sum(rouge1_scores) / len(rouge1_scores)
+            results["rouge2"] = sum(rouge2_scores) / len(rouge2_scores)
+            results["rougeL"] = sum(rougeL_scores) / len(rougeL_scores)
+        else:
+            results["bleu"] = 0.0
+            results["rouge1"] = 0.0
+            results["rouge2"] = 0.0
+            results["rougeL"] = 0.0
+            print_log("Warning: No ground truth answers found, cannot calculate metrics", logger="current")
+        
+        # 打印结果
+        print_log(f"\n{'='*80}", logger="current")
+        print_log(f"ImgConv Evaluation Results for {self._data_name}", logger="current")
+        print_log(f"{'='*80}", logger="current")
+        print_log(f"Number of samples: {results['num_samples']}", logger="current")
+        print_log(f"Number with ground truth: {results['num_with_gt']}", logger="current")
+        if bleu_scores:
+            print_log(f"BLEU Score: {results['bleu']:.4f}", logger="current")
+            print_log(f"ROUGE-1: {results['rouge1']:.4f}", logger="current")
+            print_log(f"ROUGE-2: {results['rouge2']:.4f}", logger="current")
+            print_log(f"ROUGE-L: {results['rougeL']:.4f}", logger="current")
+        print_log(f"{'='*80}\n", logger="current")
+        
+        # 在分布式环境下，只在主进程上保存结果
+        if self._distributed:
+            if not comm.is_main_process():
+                return results
+        
+        # 保存预测结果和详细评估结果到JSON文件
+        if self._output_dir is not None:
+            os.makedirs(self._output_dir, exist_ok=True)
+            
+            # 1. 保存predictions.json（与其他评估器保持一致）
+            predictions = []
+            for i, (pred, ref, question, image_file) in enumerate(zip(
+                self._predictions,
+                self._references,
+                self._questions,
+                self._image_files,
+            )):
+                print_log(f"self._image_files: {self._image_files}", logger="current")
+                prediction_item = {
+                    "sample_id": i,
+                    "image_file": self._image_files[i] if i < len(self._image_files) else "",
+                    "question": question,
+                    "prediction": pred,
+                    "reference": ref,
+                }
+                predictions.append(prediction_item)
+            
+            predictions_file = osp.join(self._output_dir, "predictions.json")
+            print_log(f"Writing {self._data_name} predictions to {self._output_dir}...", logger="current")
+            with open(predictions_file, 'w', encoding='utf-8') as f:
+                json.dump(predictions, f, indent=2, ensure_ascii=False)
+            print_log(f"Predictions saved to: {predictions_file}", logger="current")
+            
+            # 2. 保存详细的评估结果（包含指标分数）
+            detailed_results = {
+                "summary": results,
+                "detailed_scores": []
+            }
+            
+            for i, (pred, ref, question) in enumerate(zip(
+                self._predictions,
+                self._references,
+                self._questions
+            )):
+                if ref:
+                    bleu = self._calculate_bleu(pred, ref)
+                    rouge = self._calculate_rouge(pred, ref)
+                    detailed_results["detailed_scores"].append({
+                        "sample_id": i,
+                        "image_file": self._image_files[i] if i < len(self._image_files) else "",
+                        "question": question,
+                        "prediction": pred,
+                        "reference": ref,
+                        "bleu": bleu,
+                        "rouge1": rouge["rouge1"],
+                        "rouge2": rouge["rouge2"],
+                        "rougeL": rouge["rougeL"],
+                    })
+            
+            results_file = osp.join(self._output_dir, "imgconv_evaluation_results.json")
+            with open(results_file, 'w', encoding='utf-8') as f:
+                json.dump(detailed_results, f, indent=2, ensure_ascii=False)
+            print_log(f"Detailed evaluation results saved to: {results_file}", logger="current")
+        
+        return results
+

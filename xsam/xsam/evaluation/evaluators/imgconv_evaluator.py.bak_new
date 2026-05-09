@@ -1,0 +1,579 @@
+import itertools
+import json
+import math
+import os
+import os.path as osp
+from typing import Optional, Dict, List, Tuple
+from collections import Counter, defaultdict
+
+from xsam.utils.logging import print_log
+
+from ..utils import comm
+from .base_seg_evaluator import BaseSegEvaluator
+
+try:
+    from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+    NLTK_AVAILABLE = True
+except ImportError:
+    NLTK_AVAILABLE = False
+    print_log("Warning: nltk not available, BLEU score will not be calculated", logger="current")
+
+# METEOR: 不同 nltk 版本实现可能要求 tokenized 输入
+try:
+    if NLTK_AVAILABLE:
+        from nltk.translate.meteor_score import single_meteor_score
+        METEOR_AVAILABLE = True
+    else:
+        METEOR_AVAILABLE = False
+except Exception:
+    METEOR_AVAILABLE = False
+    single_meteor_score = None
+
+try:
+    from rouge_score import rouge_scorer
+    ROUGE_AVAILABLE = True
+except ImportError:
+    ROUGE_AVAILABLE = False
+    print_log("Warning: rouge-score not available, ROUGE score will not be calculated", logger="current")
+
+
+class ImgConvEvaluator(BaseSegEvaluator):
+    """评估器用于 imgconv（图像对话/VQA）任务。
+
+    支持指标：
+      - accuracy
+      - bleu1/bleu2/bleu3/bleu4（兼容旧写法 bleu==bleu4）
+      - rouge1/rouge2/rougeL（兼容旧写法 rouge==rouge1+rouge2+rougeL）
+      - meteor
+      - cider（内置简化 CIDEr 实现，按 COCO 常用 *10 标尺）
+    """
+
+    def __init__(
+        self,
+        data_name: str = "imgconv",
+        output_dir: Optional[str] = None,
+        distributed: bool = True,
+        metrics: Optional[List[str]] = None,
+    ):
+        self._data_name = data_name
+        self._distributed = distributed
+        self._output_dir = output_dir
+        self._metadata = None
+
+        if self._output_dir is not None:
+            os.makedirs(self._output_dir, exist_ok=True)
+
+        # ROUGE
+        if ROUGE_AVAILABLE:
+            self.rouge_scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
+        else:
+            self.rouge_scorer = None
+
+        # BLEU smoothing
+        if NLTK_AVAILABLE:
+            self.smoothing = SmoothingFunction().method1
+        else:
+            self.smoothing = None
+
+        self._metrics = self._validate_metrics(metrics)
+
+        # METEOR runtime guard：缺资源或版本不兼容时避免刷屏
+        self._meteor_runtime_disabled = False
+        self._meteor_warned_once = False
+
+        # CIDEr：idf 缓存（evaluate 时基于当前 dataset refs 构建）
+        self._cider_df = None
+        self._cider_doc_n = None
+
+        self.reset()
+
+    def _validate_metrics(self, metrics: Optional[List[str]]) -> List[str]:
+        if metrics is None:
+            metrics = ["accuracy", "bleu4", "rouge1", "rouge2", "rougeL", "meteor", "cider"]
+
+        metrics = [m.lower().strip() for m in list(metrics)]
+        metrics = ["bleu4" if m == "bleu" else m for m in metrics]
+
+        expanded = []
+        for m in metrics:
+            if m == "rouge":
+                expanded.extend(["rouge1", "rouge2", "rougeL"])
+            else:
+                expanded.append(m)
+        metrics = expanded
+
+        valid = {
+            "accuracy",
+            "bleu1", "bleu2", "bleu3", "bleu4",
+            "rouge1", "rouge2", "rougel",
+            "meteor",
+            "cider",
+        }
+        unknown = [m for m in metrics if m not in valid]
+        if unknown:
+            raise ValueError(f"Unknown metrics: {unknown}. Valid metrics: {sorted(list(valid))}")
+
+        if any(m.startswith("bleu") for m in metrics) and not NLTK_AVAILABLE:
+            print_log("Warning: nltk not available, BLEU will be skipped", logger="current")
+            metrics = [m for m in metrics if not m.startswith("bleu")]
+
+        if any(m.startswith("rouge") for m in metrics) and not ROUGE_AVAILABLE:
+            print_log("Warning: rouge-score not available, ROUGE will be skipped", logger="current")
+            metrics = [m for m in metrics if not m.startswith("rouge")]
+
+        if "meteor" in metrics and (not NLTK_AVAILABLE or not METEOR_AVAILABLE):
+            print_log("Warning: meteor not available (nltk/meteor_score missing), METEOR will be skipped", logger="current")
+            metrics = [m for m in metrics if m != "meteor"]
+
+        seen = set()
+        out = []
+        for m in metrics:
+            if m == "rougel":
+                m = "rougeL"
+            if m not in seen:
+                out.append(m)
+                seen.add(m)
+        return out
+
+    @property
+    def metadata(self):
+        return self._metadata
+
+    @metadata.setter
+    def metadata(self, value):
+        self._metadata = value
+
+    @property
+    def output_dir(self):
+        return self._output_dir
+
+    @output_dir.setter
+    def output_dir(self, value):
+        self._output_dir = value
+        if self._output_dir is not None:
+            os.makedirs(self._output_dir, exist_ok=True)
+
+    @property
+    def data_name(self):
+        return self._data_name
+
+    def reset(self):
+        self._predictions = []
+        self._references = []
+        self._questions = []
+        self._image_files = []
+
+    def _extract_question_ground_truth(self, val_input):
+        if not isinstance(val_input, dict):
+            return None
+        conversation = val_input.get("conversation", [])
+        if not conversation:
+            return None
+        gt = conversation[-1].get("output", "")
+        question = conversation[-1].get("input", "")
+        return (question or "").strip(), (gt or "").strip()
+
+    def _tokenize(self, text: str) -> List[str]:
+        """简单 tokenization（英文友好；中文会退化）。"""
+        import re
+        text = re.sub(r"[^\w\s]", "", (text or "").lower())
+        return text.split()
+
+    def process(self, val_inputs, llm_outputs):
+        if isinstance(val_inputs, list) and len(val_inputs) > 0:
+            for val_input, llm_output in zip(val_inputs, llm_outputs):
+                question, gt_answer = self._extract_question_ground_truth(val_input)
+                image_file = val_input.get("image_file", "")
+
+                self._references.append(gt_answer if gt_answer else "")
+                self._predictions.append((llm_output or ""))
+                self._questions.append(question or "")
+                self._image_files.append(image_file or "")
+
+    # =========================
+    # BLEU
+    # =========================
+    def _bleu_weights(self, n: int):
+        if n == 1:
+            return (1.0, 0.0, 0.0, 0.0)
+        if n == 2:
+            return (0.5, 0.5, 0.0, 0.0)
+        if n == 3:
+            return (1.0 / 3, 1.0 / 3, 1.0 / 3, 0.0)
+        if n == 4:
+            return (0.25, 0.25, 0.25, 0.25)
+        raise ValueError(f"Unsupported BLEU n={n}, expected 1..4")
+
+    def _calculate_bleu_n(self, prediction: str, reference: str, n: int = 4) -> float:
+        if not NLTK_AVAILABLE:
+            return 0.0
+        pred_tokens = self._tokenize(prediction)
+        ref_tokens = self._tokenize(reference)
+        if len(ref_tokens) == 0:
+            return 0.0
+        try:
+            return float(sentence_bleu(
+                [ref_tokens],
+                pred_tokens,
+                weights=self._bleu_weights(n),
+                smoothing_function=self.smoothing
+            ))
+        except Exception as e:
+            print_log(f"Error calculating BLEU-{n} score: {e}", logger="current")
+            return 0.0
+
+    # =========================
+    # ROUGE
+    # =========================
+    def _calculate_rouge_all(self, prediction: str, reference: str) -> Dict[str, float]:
+        if not ROUGE_AVAILABLE or self.rouge_scorer is None:
+            return {"rouge1": 0.0, "rouge2": 0.0, "rougeL": 0.0}
+        try:
+            scores = self.rouge_scorer.score(reference, prediction)
+            return {
+                "rouge1": float(scores["rouge1"].fmeasure),
+                "rouge2": float(scores["rouge2"].fmeasure),
+                "rougeL": float(scores["rougeL"].fmeasure),
+            }
+        except Exception:
+            return {"rouge1": 0.0, "rouge2": 0.0, "rougeL": 0.0}
+
+    # =========================
+    # METEOR (FIXED: tokenized input)
+    # =========================
+    def _calculate_meteor(self, prediction: str, reference: str) -> float:
+        """METEOR：对当前 nltk 版本，传入 token list（Iterable[str]）。"""
+        if not METEOR_AVAILABLE or single_meteor_score is None:
+            return 0.0
+        if self._meteor_runtime_disabled:
+            return 0.0
+
+        try:
+            hyp_tokens = self._tokenize(prediction)
+            ref_tokens = self._tokenize(reference)
+            if not ref_tokens:
+                return 0.0
+            # ✅ 关键：传 tokenized 输入，避免 “expects pre-tokenized hypothesis”
+            return float(single_meteor_score(ref_tokens, hyp_tokens))
+        except LookupError as e:
+            # 常见：缺 wordnet / omw-1.4 等 nltk data
+            if not self._meteor_warned_once:
+                print_log(
+                    f"Warning: METEOR disabled due to missing NLTK data (e.g., wordnet). Error: {e}",
+                    logger="current"
+                )
+                self._meteor_warned_once = True
+            self._meteor_runtime_disabled = True
+            return 0.0
+        except Exception as e:
+            if not self._meteor_warned_once:
+                print_log(f"Warning: METEOR disabled due to runtime error: {e}", logger="current")
+                self._meteor_warned_once = True
+            self._meteor_runtime_disabled = True
+            return 0.0
+
+    # =========================
+    # CIDEr (simplified, self-contained)
+    # =========================
+    def _get_ngrams(self, tokens: List[str], n: int) -> Counter:
+        grams = Counter()
+        if n <= 0 or len(tokens) < n:
+            return grams
+        for i in range(len(tokens) - n + 1):
+            grams[tuple(tokens[i:i + n])] += 1
+        return grams
+
+    def _prepare_cider_df(self, references: List[str], max_n: int = 4) -> Tuple[List[Dict[Tuple[str, ...], int]], int]:
+        df = [defaultdict(int) for _ in range(max_n)]
+        docs = 0
+        for ref in references:
+            if not ref:
+                continue
+            docs += 1
+            tokens = self._tokenize(ref)
+            for n in range(1, max_n + 1):
+                grams = self._get_ngrams(tokens, n)
+                for g in grams.keys():
+                    df[n - 1][g] += 1
+        return df, docs
+
+    def _cider_vec(self, text: str, df: List[Dict[Tuple[str, ...], int]], doc_n: int, n: int) -> Dict[Tuple[str, ...], float]:
+        tokens = self._tokenize(text)
+        grams = self._get_ngrams(tokens, n)
+        total = sum(grams.values())
+        if total <= 0 or doc_n <= 0:
+            return {}
+        vec = {}
+        df_n = df[n - 1]
+        for g, c in grams.items():
+            dfg = df_n.get(g, 0)
+            idf = math.log(max(1.0, float(doc_n) / max(1.0, float(dfg))))
+            tf = float(c) / float(total)
+            vec[g] = tf * idf
+        return vec
+
+    def _cosine(self, a: Dict[Tuple[str, ...], float], b: Dict[Tuple[str, ...], float]) -> float:
+        if not a or not b:
+            return 0.0
+        if len(a) > len(b):
+            a, b = b, a
+        dot = 0.0
+        for k, va in a.items():
+            vb = b.get(k)
+            if vb is not None:
+                dot += va * vb
+        na = math.sqrt(sum(v * v for v in a.values()))
+        nb = math.sqrt(sum(v * v for v in b.values()))
+        if na <= 0.0 or nb <= 0.0:
+            return 0.0
+        return dot / (na * nb)
+
+    def _calculate_cider(self, prediction: str, references: List[str]) -> float:
+        if self._cider_df is None or self._cider_doc_n is None or self._cider_doc_n <= 0:
+            return 0.0
+        if not references:
+            return 0.0
+
+        max_n = 4
+        scores_n = []
+        for n in range(1, max_n + 1):
+            cand_vec = self._cider_vec(prediction, self._cider_df, self._cider_doc_n, n)
+            if not cand_vec:
+                scores_n.append(0.0)
+                continue
+            sims = []
+            for ref in references:
+                if not ref:
+                    continue
+                ref_vec = self._cider_vec(ref, self._cider_df, self._cider_doc_n, n)
+                sims.append(self._cosine(cand_vec, ref_vec))
+            scores_n.append(sum(sims) / len(sims) if sims else 0.0)
+
+        return 10.0 * (sum(scores_n) / len(scores_n))
+
+    # =========================
+    # Accuracy
+    # =========================
+    def _normalize_answer(self, s: str) -> str:
+        import re
+        s = (s or "").strip().lower()
+        s = re.sub(r"[^\w\s]", "", s)
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
+
+    # =========================
+    # Evaluate
+    # =========================
+    def evaluate(self):
+        metrics = getattr(self, "_metrics", ["accuracy", "bleu4", "rouge1", "rouge2", "rougeL", "meteor", "cider"])
+
+        need_acc = "accuracy" in metrics
+        need_bleu_ns = sorted({int(m[-1]) for m in metrics if m.startswith("bleu")})
+        need_any_bleu = len(need_bleu_ns) > 0
+
+        need_rouge_keys = []
+        if "rouge1" in metrics:
+            need_rouge_keys.append("rouge1")
+        if "rouge2" in metrics:
+            need_rouge_keys.append("rouge2")
+        if "rougeL" in metrics:
+            need_rouge_keys.append("rougeL")
+        need_any_rouge = len(need_rouge_keys) > 0
+
+        need_meteor = "meteor" in metrics
+        need_cider = "cider" in metrics
+
+        # --------- 1) 分布式收集 ---------
+        if self._distributed:
+            comm.synchronize()
+
+            local_items = []
+            n = min(
+                len(getattr(self, "_predictions", [])),
+                len(getattr(self, "_references", [])),
+                len(getattr(self, "_questions", [])),
+                len(getattr(self, "_image_files", [])),
+            )
+            for i in range(n):
+                local_items.append({
+                    "image_file": self._image_files[i],
+                    "question": self._questions[i],
+                    "prediction": self._predictions[i],
+                    "reference": self._references[i],
+                })
+
+            gathered = comm.gather(local_items, dst=0)
+            if not comm.is_main_process():
+                return {}
+
+            merged_items = list(itertools.chain(*gathered)) if gathered is not None else []
+        else:
+            merged_items = []
+            n = min(
+                len(getattr(self, "_predictions", [])),
+                len(getattr(self, "_references", [])),
+                len(getattr(self, "_questions", [])),
+                len(getattr(self, "_image_files", [])),
+            )
+            for i in range(n):
+                merged_items.append({
+                    "image_file": self._image_files[i],
+                    "question": self._questions[i],
+                    "prediction": self._predictions[i],
+                    "reference": self._references[i],
+                })
+
+        # --------- 2) 空预测保护 ---------
+        if len(merged_items) == 0:
+            print_log("Warning: No predictions to evaluate", logger="current")
+            return {"task": "imgconv", "data_name": self._data_name, "status": "no_predictions"}
+
+        # --------- 2.5) CIDEr DF/IDF 构建（用当前数据的 references）---------
+        if need_cider:
+            all_refs = []
+            for it in merged_items:
+                r = (it.get("reference") or "").strip()
+                if r:
+                    all_refs.append(r)
+            self._cider_df, self._cider_doc_n = self._prepare_cider_df(all_refs, max_n=4)
+
+        # --------- 3) 遍历：逐样本算分数 + 汇总 ---------
+        predictions_json = []
+        detailed_scores = []
+
+        num_with_gt = 0
+        correct = 0
+
+        sum_bleu = {n: 0.0 for n in need_bleu_ns}
+        sum_rouge = {"rouge1": 0.0, "rouge2": 0.0, "rougeL": 0.0}
+        sum_meteor = 0.0
+        sum_cider = 0.0
+
+        for sample_id, item in enumerate(merged_items):
+            pred = (item.get("prediction") or "").strip()
+            ref = (item.get("reference") or "").strip()
+            question = (item.get("question") or "").strip()
+            image_file = item.get("image_file") or ""
+
+            predictions_json.append({
+                "sample_id": sample_id,
+                "image_file": image_file,
+                "question": question,
+                "prediction": pred,
+                "reference": ref,
+            })
+
+            if not ref:
+                continue
+
+            num_with_gt += 1
+
+            d = {
+                "sample_id": sample_id,
+                "image_file": image_file,
+                "question": question,
+                "prediction": pred,
+                "reference": ref,
+            }
+
+            if need_acc:
+                em = 1 if self._normalize_answer(pred) == self._normalize_answer(ref) else 0
+                correct += em
+                d["exact_match"] = em
+
+            if need_any_bleu:
+                for n_bleu in need_bleu_ns:
+                    bleu_n = self._calculate_bleu_n(pred, ref, n=n_bleu)
+                    sum_bleu[n_bleu] += bleu_n
+                    d[f"bleu{n_bleu}"] = bleu_n
+
+            if need_any_rouge:
+                rouge_all = self._calculate_rouge_all(pred, ref)
+                for k in need_rouge_keys:
+                    sum_rouge[k] += rouge_all[k]
+                    d[k] = rouge_all[k]
+
+            if need_meteor:
+                m = self._calculate_meteor(pred, ref)
+                sum_meteor += m
+                d["meteor"] = m
+
+            if need_cider:
+                c = self._calculate_cider(pred, [ref])
+                sum_cider += c
+                d["cider"] = c
+
+            detailed_scores.append(d)
+
+        # --------- 4) summary ---------
+        results = {
+            "task": "imgconv",
+            "data_name": self._data_name,
+            "metrics": metrics,
+            "num_samples": len(merged_items),
+            "num_with_gt": num_with_gt,
+        }
+
+        if need_acc:
+            results["accuracy"] = (correct / num_with_gt) if num_with_gt else 0.0
+
+        if need_any_bleu:
+            for n_bleu in need_bleu_ns:
+                results[f"bleu{n_bleu}"] = (sum_bleu[n_bleu] / num_with_gt) if num_with_gt else 0.0
+
+        if need_any_rouge:
+            for k in need_rouge_keys:
+                results[k] = (sum_rouge[k] / num_with_gt) if num_with_gt else 0.0
+
+        if need_meteor:
+            results["meteor"] = (sum_meteor / num_with_gt) if num_with_gt else 0.0
+
+        if need_cider:
+            results["cider"] = (sum_cider / num_with_gt) if num_with_gt else 0.0
+
+        # --------- 5) 打印 ---------
+        print_log(f"\n{'='*80}", logger="current")
+        print_log(f"ImgConv Evaluation Results for {self._data_name}", logger="current")
+        print_log(f"Metrics: {metrics}", logger="current")
+        print_log(f"{'='*80}", logger="current")
+        print_log(f"Number of samples: {results['num_samples']}", logger="current")
+        print_log(f"Number with ground truth: {results['num_with_gt']}", logger="current")
+
+        if num_with_gt == 0:
+            print_log("Warning: No ground truth answers found, cannot calculate metrics", logger="current")
+        else:
+            if need_acc:
+                print_log(f"Accuracy: {results['accuracy']:.4f}", logger="current")
+            if need_any_bleu:
+                for n_bleu in need_bleu_ns:
+                    print_log(f"BLEU-{n_bleu}: {results[f'bleu{n_bleu}']:.4f}", logger="current")
+            if need_any_rouge:
+                if "rouge1" in need_rouge_keys:
+                    print_log(f"ROUGE-1: {results['rouge1']:.4f}", logger="current")
+                if "rouge2" in need_rouge_keys:
+                    print_log(f"ROUGE-2: {results['rouge2']:.4f}", logger="current")
+                if "rougeL" in need_rouge_keys:
+                    print_log(f"ROUGE-L: {results['rougeL']:.4f}", logger="current")
+            if need_meteor:
+                print_log(f"METEOR: {results['meteor']:.4f}", logger="current")
+            if need_cider:
+                print_log(f"CIDEr: {results['cider']:.4f}", logger="current")
+
+        print_log(f"{'='*80}\n", logger="current")
+
+        # --------- 6) 落盘 ---------
+        if self._output_dir is not None:
+            os.makedirs(self._output_dir, exist_ok=True)
+
+            predictions_file = osp.join(self._output_dir, "predictions.json")
+            print_log(f"Writing {self._data_name} predictions to {self._output_dir}...", logger="current")
+            with open(predictions_file, "w", encoding="utf-8") as f:
+                json.dump(predictions_json, f, indent=2, ensure_ascii=False)
+            print_log(f"Predictions saved to: {predictions_file}", logger="current")
+
+            results_file = osp.join(self._output_dir, "imgconv_evaluation_results.json")
+            with open(results_file, "w", encoding="utf-8") as f:
+                json.dump({"summary": results, "detailed_scores": detailed_scores}, f, indent=2, ensure_ascii=False)
+            print_log(f"Detailed evaluation results saved to: {results_file}", logger="current")
+
+        return results

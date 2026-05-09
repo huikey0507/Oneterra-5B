@@ -1,0 +1,8 @@
+一. dockder环境
+激活里面的xsam：参考source /root/miniconda3/bin/activate xsam 
+
+二. 模型推理脚本
+1. 转到/RS-Xsam-main项目路径
+2.  推理命令：bash xsam_predict_genseg_pano_021.sh   ./checkpoints/s3_mixed_fineture_base/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune_all_v1/pytorch_model.bin   ./test_images   ./output_align_eval   ./assets/pano/annotations_val.json
+解释：输入含模型文件路径、测试图片文件夹路径、输出文件夹路径和标签定义文件
+3. 其中输出文件夹内mask2文件夹里面是category_id,可供后续处理；vis文件夹是可视化结果

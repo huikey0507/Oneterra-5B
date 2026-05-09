@@ -1,0 +1,16 @@
+# Evaluation artifacts
+/eval/
+/eval_results*/
+**/eval_results*/
+*.jar
+
+# Root-level symlink mounts
+/checkpoints
+/datas
+/inits
+/test_images
+/docs/videos
+
+# Caption eval (Java/pycocoevalcap); do not upload
+**/pycocoevalcap/
+
