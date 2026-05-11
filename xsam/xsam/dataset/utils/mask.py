@@ -4,6 +4,21 @@ import torch
 from pycocotools import mask as mask_utils
 
 
+def _align_mask_shape(mask: np.ndarray, height: int, width: int) -> np.ndarray:
+    """Align decoded mask shape to target image size by safe pad/crop."""
+    mask = np.asarray(mask, dtype=np.int8).squeeze()
+    if mask.ndim != 2:
+        raise ValueError(f"Decoded mask must be 2D, got shape: {mask.shape}")
+    if mask.shape == (height, width):
+        return mask
+
+    aligned = np.zeros((height, width), dtype=np.int8)
+    copy_h = min(height, mask.shape[0])
+    copy_w = min(width, mask.shape[1])
+    aligned[:copy_h, :copy_w] = mask[:copy_h, :copy_w]
+    return aligned
+
+
 def decode_mask(segmentation, height, width):
     binary_mask = np.zeros((height, width), dtype=np.int8)
     if isinstance(segmentation, dict):
@@ -11,17 +26,20 @@ def decode_mask(segmentation, height, width):
             segmentation = mask_utils.frPyObjects(segmentation, *segmentation["size"])
             segmentation["counts"] = segmentation["counts"].decode("utf-8")
         mask = mask_utils.decode(segmentation).astype(np.int8)
-        binary_mask = np.maximum(binary_mask, mask.squeeze())
+        mask = _align_mask_shape(mask, height, width)
+        binary_mask = np.maximum(binary_mask, mask)
     elif isinstance(segmentation[0], dict):
         for seg in segmentation:
             mask = mask_utils.decode(seg).astype(np.int8)
-            binary_mask = np.maximum(binary_mask, mask.squeeze())
+            mask = _align_mask_shape(mask, height, width)
+            binary_mask = np.maximum(binary_mask, mask)
     elif isinstance(segmentation[0], list):
         for seg in segmentation:
             rles = mask_utils.frPyObjects([seg], height, width)
             rle = mask_utils.merge(rles)
             mask = mask_utils.decode(rle)
-            binary_mask = np.maximum(binary_mask, mask.squeeze())
+            mask = _align_mask_shape(mask, height, width)
+            binary_mask = np.maximum(binary_mask, mask)
     else:
         raise ValueError(f"Invalid segmentation type: {type(segmentation)}")
 
