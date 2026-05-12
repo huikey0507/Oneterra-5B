@@ -65,7 +65,9 @@ class GenericSegDataset(BaseDataset):
             if "color" in cats[0]
             else get_palette("random", len(cats))
         )
-        dataset_id_to_contiguous_id = {x["id"]: i for i, x in enumerate(cats)}
+        # 必须与 enumerate(cat_ids) 一致：mask/class 的 contiguous 下标来自 sorted(cat_ids)，
+        # 若用 JSON 中 categories 原始顺序会与 thing_/stuff_ 映射及后处理 pred_labels 不一致，导致可视化类别错位。
+        dataset_id_to_contiguous_id = {cat_id: i for i, cat_id in enumerate(cat_ids)}
         cat_id_to_name = {x["id"]: x["name"] for x in cats}
         cat_id_to_color = {x["id"]: cat_colors[dataset_id_to_contiguous_id[x["id"]]] for x in cats}
 
@@ -106,7 +108,8 @@ class GenericSegDataset(BaseDataset):
             if "color" in cats[0]
             else get_palette("random", len(cats))
         )
-        dataset_id_to_contiguous_id = {x["id"]: i for i, x in enumerate(cats)}
+        # 与 _sample_cats / pred_labels 的 contiguous 语义一致：按 category id 排序后的下标（同 enumerate(cat_ids)）。
+        dataset_id_to_contiguous_id = {cat_id: i for i, cat_id in enumerate(cat_ids)}
         cat_id_to_name = {x["id"]: x["name"] for x in cats}
         cat_id_to_color = {x["id"]: cat_colors[dataset_id_to_contiguous_id[x["id"]]] for x in cats}
 

@@ -1,23 +1,23 @@
 #!/bin/bash
 
-# X-SAM Demo 启动脚本（对齐 xsam_eval_021.sh 的配置与权重）
+# 遥感基础模型 OneTerra-5B Gradio 推理台启动脚本（app_021.py）；与 xsam_eval_021.sh 使用相同默认 config / checkpoint。
 
 set -euo pipefail
 
-# 保证从脚本所在目录启动，并设置与训练/评测一致的 PYTHONPATH
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CODE_DIR="$ROOT_DIR/xsam"
 export PYTHONPATH="$CODE_DIR:${PYTHONPATH:-}"
 
-# 与 xsam_eval_021.sh 保持一致的默认配置
+# 与 xsam_eval_021.sh（→ eval_ori.py）默认 CONFIG / PTH_MODEL 保持一致
 CONFIG="/mnt_llm_A100_V1/shui/LAE/RS-Xsam-main-old/xsam/xsam/configs/xsam/phi3_mini_4k_instruct_siglip2_so400m_p14_384/s3_mixed_fineture_base/xsam_base_mixed_finetune_all.py"
-DEFAULT_PTH_MODEL="/mnt_llm_A100_V1/shui/LAE/OneTerra-train/wkdrs_01/s3_mixed_fineture_base/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune_all_v1/pytorch_model.bin"
-
-# 可选参数
+DEFAULT_PTH_MODEL="/mnt_llm_A100_V1/shui/LAE/OneTerra-train/wkdrs/s3_mixed_fineture_base/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_ovseg_subset_ft_flat_v1/iter_30000.pth"
+#DEFAULT_PTH_MODEL="/mnt_llm_A100_V1/shui/LAE/OneTerra-train/wkdrs_01/s3_mixed_fineture_base/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune_all_v1/pytorch_model.bin"
+# 参数与 eval 对齐：$1 checkpoint，$2 work-dir（与 eval 的第二个参数含义相同，用于 vis/ 与 latest）
 PTH_MODEL="${1:-$DEFAULT_PTH_MODEL}"
-PORT="${2:-7862}"
-HOST="${3:-0.0.0.0}"
-LOG_DIR="${4:-./demo_logs_021}"
+WORK_DIR="${2:-./demo_work_021}"
+PORT="${3:-7862}"
+HOST="${4:-0.0.0.0}"
+LOG_DIR="${5:-./demo_logs_021}"
 
 if [ ! -f "$PTH_MODEL" ] && [ ! -d "$PTH_MODEL" ]; then
     echo "错误: checkpoint路径不存在: $PTH_MODEL"
@@ -25,10 +25,11 @@ if [ ! -f "$PTH_MODEL" ] && [ ! -d "$PTH_MODEL" ]; then
 fi
 
 echo "=========================================="
-echo "X-SAM Demo 启动脚本"
+echo "遥感基础模型OneTerra-5B 推理台 (app_021)"
 echo "=========================================="
 echo "配置文件: $CONFIG"
 echo "Checkpoint: $PTH_MODEL"
+echo "work-dir (vis/): $WORK_DIR"
 echo "端口: $PORT"
 echo "地址: $HOST"
 echo "日志目录: $LOG_DIR"
@@ -36,9 +37,11 @@ echo "=========================================="
 echo ""
 
 cd "$ROOT_DIR"
-python xsam/xsam/demo/app.py \
+# 界面在 app_021.py：输入为单图上传（无图层/画笔）；显示区 CSS 减少预览黑边。
+python xsam/xsam/demo/app_021.py \
     "$CONFIG" \
     --pth_model "$PTH_MODEL" \
+    --work-dir "$WORK_DIR" \
     --seed 0 \
     --port "$PORT" \
     --host "$HOST" \

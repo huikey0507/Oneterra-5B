@@ -53,12 +53,114 @@ from xsam.utils.checkpoint import load_checkpoint
 from xsam.utils.config import setup_model_config
 from xsam.utils.constants import DEFAULT_IMAGE_TOKEN, INDEX2TOKEN
 from xsam.utils.logging import print_log, set_default_logging_format
+from xsam.utils.palette import get_palette
 from xsam.utils.misc import data_dict_to_device
 from xsam.utils.utils import register_function
 
 # Global setup
 set_default_logging_format()
 warnings.filterwarnings("ignore")
+
+# ovseg 为开集：类别完全由用户在提示中给出，不用固定评测集 catalog 名（避免与 sota_panoptic_ovseg_val 等混淆）
+OVSEG_OPEN_METADATA_NAME = "open_panoptic_ovseg_user"
+
+
+def _panoptic_pred_segments_info_for_vis(segments_info, metadata, sampled_labels=None):
+    """Demo 全景预测可视化：与评测侧逻辑对齐。
+
+    open_cls 下 compute_segments 的 category_id 为「当前提示中类别顺序」下标；若提供与 DataLoader
+    中 sampled_labels 同义的 dataset_id 列表（与 sampled_cats 顺序一致），则按该表映射到 COCO id；
+    否则回退 metadata 的 contiguous→dataset 逆映射（与 eval_ori._panoptic_pred_segments_info_for_vis 一致）。
+    """
+    if segments_info is None or not isinstance(segments_info, list):
+        return segments_info
+    thing_ds_keys = set(getattr(metadata, "thing_dataset_id_to_contiguous_id", None) or {})
+    ds_to_cont = getattr(metadata, "dataset_id_to_contiguous_id", None) or {}
+    cont_to_ds = {int(v): int(k) for k, v in ds_to_cont.items()} if ds_to_cont else {}
+
+    def _cid_to_dataset_id(cid: int) -> int:
+        if sampled_labels is not None and len(sampled_labels) > 0:
+            if 0 <= cid < len(sampled_labels):
+                return int(sampled_labels[cid])
+        if cont_to_ds:
+            return int(cont_to_ds.get(cid, cid))
+        return cid
+
+    out = []
+    for s in segments_info:
+        t = dict(s)
+        cid = t.get("category_id")
+        if cid is not None:
+            cid = int(cid)
+            ds_cat = _cid_to_dataset_id(cid)
+            t["category_id"] = ds_cat
+            t["isthing"] = ds_cat in thing_ds_keys
+        out.append(t)
+    return out
+
+
+def register_panoptic_metadata_from_coco_json(
+    coco_data: dict,
+    data_name: str,
+    *,
+    gt_json_path: str,
+    panseg_map_folder=None,
+    semseg_map_folder=None,
+    semseg_sufix: str = ".png",
+    ignore_label: int = 255,
+) -> None:
+    """与 GenericSegDataset._set_panoptic_metadata 一致，将 pano COCO JSON 写入 MetadataCatalog（供 genseg 推理与可视化）。"""
+    cats = coco_data["categories"]
+    cat_ids = sorted([cat["id"] for cat in cats])
+    cat_colors = (
+        [x["color"] for x in sorted(cats, key=lambda x: x["id"])]
+        if cats and "color" in cats[0]
+        else get_palette("random", len(cats))
+    )
+    dataset_id_to_contiguous_id = {x["id"]: i for i, x in enumerate(sorted(cats, key=lambda x: x["id"]))}
+    cat_id_to_name = {x["id"]: x["name"] for x in cats}
+    cat_id_to_color = {x["id"]: cat_colors[dataset_id_to_contiguous_id[x["id"]]] for x in cats}
+
+    thing_cats = [x for x in cats if x.get("isthing", None) == 1]
+    thing_cat_ids = [x["id"] for x in thing_cats]
+    stuff_cats = [x for x in cats if x.get("isthing", None) == 0]
+    stuff_cat_ids = [x["id"] for x in stuff_cats]
+    thing_cat_id_to_contiguous_id = {
+        cat_id: cont_id for cont_id, cat_id in enumerate(cat_ids) if cat_id in thing_cat_ids
+    }
+    stuff_cat_id_to_contiguous_id = {
+        cat_id: cont_id for cont_id, cat_id in enumerate(cat_ids) if cat_id in stuff_cat_ids
+    }
+    thing_cat_id_to_name = {thing_cat_id_to_contiguous_id[x["id"]]: x["name"] for x in thing_cats}
+    stuff_cat_id_to_name = {stuff_cat_id_to_contiguous_id[x["id"]]: x["name"] for x in stuff_cats}
+    thing_cat_id_to_color = {
+        thing_cat_id_to_contiguous_id[x["id"]]: cat_colors[thing_cat_id_to_contiguous_id[x["id"]]]
+        for x in thing_cats
+    }
+    stuff_cat_id_to_color = {
+        stuff_cat_id_to_contiguous_id[x["id"]]: cat_colors[stuff_cat_id_to_contiguous_id[x["id"]]]
+        for x in stuff_cats
+    }
+
+    metadata = MetadataCatalog.get(data_name)
+    metadata.set(
+        gt_json=gt_json_path,
+        semseg_sufix=semseg_sufix,
+        panseg_map_folder=panseg_map_folder,
+        semseg_map_folder=semseg_map_folder,
+        data_name=data_name,
+        dataset_classes=cat_id_to_name,
+        dataset_colors=cat_id_to_color,
+        thing_classes=thing_cat_id_to_name,
+        thing_colors=thing_cat_id_to_color,
+        stuff_classes=stuff_cat_id_to_name,
+        stuff_colors=stuff_cat_id_to_color,
+        dataset_id_to_contiguous_id=dataset_id_to_contiguous_id,
+        thing_dataset_id_to_contiguous_id=thing_cat_id_to_contiguous_id,
+        stuff_dataset_id_to_contiguous_id=stuff_cat_id_to_contiguous_id,
+        ignore_label=ignore_label,
+        label_divisor=1000,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -166,6 +268,55 @@ class XSamDemo:
         self.template_map_fns = self.build_template_map_fns()
         self.postprocess_fns = self.build_postprocess_fn()
         self._current_classes = None  # 用于ovseg任务过滤segments
+
+        # genseg 与 eval_ori 中 panoptic_genseg_pano_val 对齐：全量类别时用 pano JSON 注册 Metadata
+        self._pano_genseg_json_path = None
+        self._pano_coco_raw = None
+        self._pano_full_signature = None
+        if hasattr(self.cfg, "pano_data_root") and self.cfg.pano_data_root:
+            pano_root = self.cfg.pano_data_root
+            for cand in ("annotations_val.json", "annotations_train.json"):
+                p = osp.join(pano_root, cand)
+                if osp.isfile(p):
+                    self._pano_genseg_json_path = p
+                    break
+            if self._pano_genseg_json_path:
+                try:
+                    with open(self._pano_genseg_json_path, "r", encoding="utf-8") as f:
+                        self._pano_coco_raw = json.load(f)
+                    th, st, _ = self._thing_stuff_names_from_coco_categories(self._pano_coco_raw)
+                    self._pano_full_signature = (tuple(th + st), tuple(th), tuple(st))
+                except Exception as e:
+                    print_log(f"Could not load pano genseg categories: {e}", logger="current")
+                    self._pano_genseg_json_path = None
+                    self._pano_coco_raw = None
+                    self._pano_full_signature = None
+
+    def _pano_panseg_folder_for_json(self, json_path: str) -> str:
+        root = self.cfg.pano_data_root
+        if "annotations_val" in json_path or json_path.endswith("val_annotations.json"):
+            return osp.join(root, "val", "panoptic_labels")
+        return osp.join(root, "train", "panoptic_labels")
+
+    @staticmethod
+    def _thing_stuff_names_from_coco_categories(coco_data: dict):
+        cats = coco_data.get("categories", [])
+        if not cats:
+            return None, None, None
+        cats = sorted(cats, key=lambda x: x["id"])
+        thing_cats = [c for c in cats if c.get("isthing", 0) == 1]
+        stuff_cats = [c for c in cats if c.get("isthing", 0) == 0]
+        thing_classes = [c["name"] for c in thing_cats]
+        stuff_classes = [c["name"] for c in stuff_cats]
+        cat_name_to_isthing = {c["name"]: c.get("isthing", 0) for c in cats}
+        return thing_classes, stuff_classes, cat_name_to_isthing
+
+    def default_genseg_prompt(self) -> str:
+        """与评测 pano genseg 一致的 ins:/sem: 默认提示（来自 pano 或 SOTA 标注）。"""
+        thing_classes, stuff_classes, _ = self._load_sota_categories("genseg")
+        if not thing_classes or not stuff_classes:
+            return ""
+        return "ins: " + ", ".join(thing_classes) + ";\nsem: " + ", ".join(stuff_classes)
 
     def build_template_map_fns(self):
         template_map_fns = {
@@ -385,7 +536,13 @@ class XSamDemo:
         """Load SOTA dataset categories from annotations.json"""
         # Try to get data path from config
         data_paths_to_try = []
-        
+
+        # 优先 pano（与 xsam_base_mixed_finetune_all 中 panoptic_genseg_pano_val 一致）
+        if hasattr(self.cfg, "pano_data_root") and self.cfg.pano_data_root:
+            pano_root = self.cfg.pano_data_root
+            data_paths_to_try.append(osp.join(pano_root, "annotations_val.json"))
+            data_paths_to_try.append(osp.join(pano_root, "annotations_train.json"))
+
         # Try to get from config if available
         if hasattr(self.cfg, 'genseg_data_root'):
             genseg_data_root = self.cfg.genseg_data_root
@@ -394,11 +551,8 @@ class XSamDemo:
             data_paths_to_try.append(osp.join(genseg_data_root, "sota/train/train_annotations.json"))
             data_paths_to_try.append(osp.join(genseg_data_root, "sota/val/val_annotations.json"))
         
-        if hasattr(self.cfg, 'ovseg_data_root'):
-            ovseg_data_root = self.cfg.ovseg_data_root
-            data_paths_to_try.append(osp.join(ovseg_data_root, "sota/train/train_annotations.json"))
-            data_paths_to_try.append(osp.join(ovseg_data_root, "sota/val/val_annotations.json"))
-        
+        # ovseg 为开集任务，不从标注 JSON 拉取 thing/stuff；此处仅为 genseg 等保留 gen_seg / 通用路径
+
         # Try common paths
         common_paths = [
             "./datas/gen_seg_data/sota/train_annotations.json",
@@ -416,19 +570,12 @@ class XSamDemo:
         for data_path in data_paths_to_try:
             if osp.exists(data_path):
                 try:
-                    with open(data_path, 'r') as f:
+                    with open(data_path, "r", encoding="utf-8") as f:
                         coco_data = json.load(f)
-                    cats = coco_data.get("categories", [])
-                    if cats:
-                        # 按照id排序，保持与annotations.json中的顺序一致
-                        cats = sorted(cats, key=lambda x: x["id"])
-                        thing_cats = [c for c in cats if c.get("isthing", 0) == 1]
-                        stuff_cats = [c for c in cats if c.get("isthing", 0) == 0]
-                        # 保持原始顺序，不要打乱
-                        thing_classes = [c["name"] for c in thing_cats]
-                        stuff_classes = [c["name"] for c in stuff_cats]
-                        # 返回类别名称到isthing的映射
-                        cat_name_to_isthing = {c["name"]: c.get("isthing", 0) for c in cats}
+                    thing_classes, stuff_classes, cat_name_to_isthing = self._thing_stuff_names_from_coco_categories(
+                        coco_data
+                    )
+                    if thing_classes is not None and stuff_classes is not None:
                         return thing_classes, stuff_classes, cat_name_to_isthing
                 except Exception as e:
                     print_log(f"Failed to load categories from {data_path}: {e}", logger="current")
@@ -437,72 +584,26 @@ class XSamDemo:
         # Fallback: return None to indicate failure
         return None, None, None
 
-    def _get_ovseg_thing_stuff_classes(self, class_names):
-        """根据类别名称，从SOTA数据集中查找对应的isthing信息，区分thing和stuff类别"""
-        # 加载SOTA数据集的类别信息
-        thing_classes, stuff_classes, cat_name_to_isthing = self._load_sota_categories("ovseg")
-        
-        if cat_name_to_isthing is None:
-            # 如果无法加载，返回None表示失败
-            return None, None
-        
-        # 根据类别名称查找isthing信息
-        thing_classes_list = []
-        stuff_classes_list = []
-        
-        for class_name in class_names:
-            # 尝试精确匹配
-            if class_name in cat_name_to_isthing:
-                isthing = cat_name_to_isthing[class_name]
-                if isthing == 1:
-                    thing_classes_list.append(class_name)
-                else:
-                    stuff_classes_list.append(class_name)
-            else:
-                # 如果无法匹配，尝试模糊匹配（忽略大小写、空格等）
-                matched = False
-                for cat_name, isthing in cat_name_to_isthing.items():
-                    if class_name.lower().strip() == cat_name.lower().strip():
-                        if isthing == 1:
-                            thing_classes_list.append(class_name)
-                        else:
-                            stuff_classes_list.append(class_name)
-                        matched = True
-                        break
-                
-                # 如果仍然无法匹配，默认作为stuff处理
-                if not matched:
-                    print_log(f"Warning: Cannot find isthing info for class '{class_name}', treating as stuff", logger="current")
-                    stuff_classes_list.append(class_name)
-        
-        return thing_classes_list, stuff_classes_list
-
     def _get_classes_from_prompt(self, prompt, task_name):
         if task_name == "ovseg":
-            # ovseg: 开放集全景分割，用户可以任意输入thing和stuff类别
-            # 支持两种格式：
-            # 1. 明确指定: "thing: person, car; stuff: tree, building"
-            # 2. 简单列表: "person, car, tree, building" (会尝试从SOTA数据集查找isthing信息，找不到则默认作为stuff)
-            
-            # 尝试解析明确格式
+            # ovseg：开集全景，由用户在提示中显式给出 thing / stuff（或逗号列表全部视为 stuff）
+            # 1) 推荐: "thing: a, b; stuff: c, d"
+            # 2) 仅逗号列表: 全部当作 stuff（若需 thing，请用格式 1）
             thing_match = re.search(r"thing:\s*([^;]+)", prompt, re.IGNORECASE)
             stuff_match = re.search(r"stuff:\s*([^;]+)", prompt, re.IGNORECASE)
-            
+
             if thing_match or stuff_match:
-                # 格式1: 用户明确指定thing和stuff
-                thing_classes = [x.strip() for x in thing_match.group(1).split(",") if len(x.strip()) > 0] if thing_match else []
-                stuff_classes = [x.strip() for x in stuff_match.group(1).split(",") if len(x.strip()) > 0] if stuff_match else []
-                
+                thing_classes = (
+                    [x.strip() for x in thing_match.group(1).split(",") if len(x.strip()) > 0] if thing_match else []
+                )
+                stuff_classes = (
+                    [x.strip() for x in stuff_match.group(1).split(",") if len(x.strip()) > 0] if stuff_match else []
+                )
                 if not thing_classes and not stuff_classes:
-                    raise ValueError("Please provide at least one thing or stuff class for ovseg")
+                    raise ValueError("ovseg 请在提示中用 thing: / stuff: 指定至少一类（开集，由用户定义）")
             else:
-                # 格式2: 简单列表，ovseg是开放集，所有类别默认作为stuff处理
-                # 完全摒弃SOTA数据集，用户输入什么就是什么
                 classes = [x.strip() for x in prompt.split(",") if len(x.strip()) > 0]
                 assert len(classes) > 0, "Please provide at least one class for ovseg"
-                
-                # ovseg是开放集，所有类别默认作为stuff处理
-                # 如果用户需要区分thing和stuff，应该使用格式1明确指定
                 thing_classes = []
                 stuff_classes = classes
             
@@ -703,25 +804,65 @@ class XSamDemo:
             text = text.replace(ignore_token, "")
         return text
 
+    def _genseg_sampled_labels_for_vis(self, metadata, all_class_names):
+        """按提示词里类别顺序构造与评测 sampled_labels 等价的 dataset_id 列表，供 pred 可视化映射。"""
+        if not all_class_names:
+            return None
+        d2c = getattr(metadata, "dataset_id_to_contiguous_id", None) or {}
+        if isinstance(d2c, dict) and d2c and all(int(k) == int(v) for k, v in d2c.items()) and len(d2c) == len(all_class_names):
+            return list(range(len(all_class_names)))
+
+        ds_classes = getattr(metadata, "dataset_classes", None) or {}
+        if not isinstance(ds_classes, dict) or len(ds_classes) == 0:
+            return None
+
+        def _norm(x):
+            return " ".join(str(x).strip().lower().replace("_", " ").split())
+
+        norm_to_ids = {}
+        for did, name in ds_classes.items():
+            norm_to_ids.setdefault(_norm(name), []).append(int(did))
+
+        out = []
+        for raw in all_class_names:
+            ids = norm_to_ids.get(_norm(raw))
+            if not ids:
+                return None
+            out.append(ids[0])
+        return out
+
     def _set_metadata(self, task_name, classes=None):
         MetadataCatalog.reset()
-        # 使用与eval.py一致的数据名称
+        # 全量 pano genseg：与 eval_ori 中 panoptic_genseg_pano_val + Visualizer 一致
+        if task_name == "genseg" and classes is not None and self._pano_full_signature and self._pano_coco_raw:
+            sig = (tuple(classes[0]), tuple(classes[1]), tuple(classes[2]))
+            if sig == self._pano_full_signature:
+                panseg_dir = self._pano_panseg_folder_for_json(self._pano_genseg_json_path)
+                register_panoptic_metadata_from_coco_json(
+                    self._pano_coco_raw,
+                    "panoptic_genseg_pano_val",
+                    gt_json_path=self._pano_genseg_json_path,
+                    panseg_map_folder=panseg_dir if osp.isdir(panseg_dir) else None,
+                )
+                return MetadataCatalog.get("panoptic_genseg_pano_val")
+
+        # 使用与eval.py一致的数据名称（子集 genseg 或其它任务）
         if task_name == "genseg":
-            data_name = "sota_panoptic_genseg_val"  # 使用与eval.py一致的data_name
+            data_name = "sota_panoptic_genseg_val"
         elif task_name == "ovseg":
-            data_name = "sota_panoptic_ovseg_val"  # 使用与eval.py一致的data_name
+            data_name = OVSEG_OPEN_METADATA_NAME
         else:
             data_name = task_name
-        
+
         metadata = MetadataCatalog.get(data_name)
         metadata.set(
             label_divisor=1000,
             ignore_label=255,
             data_name=data_name,
         )
-        
+
         if task_name == "ovseg" and classes is not None:
-            # ovseg: 开放集全景分割，需要区分thing和stuff类别
+            # ovseg：开集，metadata 仅反映当前用户输入的 thing/stuff，不绑定任何固定 val 集名称
             all_classes, thing_classes, stuff_classes = classes
             # 调试信息：打印类别顺序
             print_log(f"OVSeg all classes order: {all_classes}", logger="current")
@@ -794,21 +935,15 @@ class XSamDemo:
         data_dict, data_samples = self._process_input_dict(data_dict)
         input_ids = data_dict["input_ids"]
 
-        # 使用与eval.py一致的metadata获取方式
-        if task_name == "genseg":
-            metadata_name = "sota_panoptic_genseg_val"
-        elif task_name == "ovseg":
-            metadata_name = "sota_panoptic_ovseg_val"
-        else:
-            metadata_name = task_name
-        
-        metadata = MetadataCatalog.get(metadata_name) if metadata_name in MetadataCatalog.list() else self.metadata
+        # 与评测 DataLoader 中 sampled_labels 对齐：open_cls 下 pred 的 class 下标对应该顺序的 COCO id
+        vis_sampled_labels = None
+        if data_samples is not None and getattr(data_samples, "sampled_labels", None) is not None:
+            sl = data_samples.sampled_labels
+            if isinstance(sl, (list, tuple)) and len(sl) > 0 and sl[0] is not None:
+                vis_sampled_labels = list(sl[0])
+        if vis_sampled_labels is None and "genseg" in task_name and classes is not None and len(classes) >= 1 and classes[0]:
+            vis_sampled_labels = self._genseg_sampled_labels_for_vis(metadata, classes[0])
 
-        # 在推理前清理GPU缓存和重置状态，避免内存碎片化和状态污染
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()  # 确保所有CUDA操作完成
-        torch.cuda.ipc_collect()  # 清理IPC资源
-        
         # 确保模型处于eval模式（防止某些层在训练模式下行为不同）
         self.model.eval()
         
@@ -833,8 +968,6 @@ class XSamDemo:
                 del data_dict
                 if data_samples is not None:
                     del data_samples
-                torch.cuda.synchronize()
-                torch.cuda.empty_cache()
             except torch.cuda.OutOfMemoryError as e:
                 print_log(f"CUDA OOM in {task_name} prediction: {e}", logger="current")
                 # OOM时强制清理
@@ -934,9 +1067,9 @@ class XSamDemo:
             try:
                 # 使用与eval.py一致的data_name
                 if task_name == "genseg":
-                    vis_data_name = "sota_panoptic_genseg_val"
+                    vis_data_name = getattr(metadata, "data_name", "sota_panoptic_genseg_val")
                 elif task_name == "ovseg":
-                    vis_data_name = "sota_panoptic_ovseg_val"
+                    vis_data_name = OVSEG_OPEN_METADATA_NAME
                 else:
                     vis_data_name = task_name_postprocess
                 
@@ -987,6 +1120,11 @@ class XSamDemo:
                     print_log(f"OVSeg filtered category_ids: {[s.get('category_id') for s in filtered_segments_info]}", logger="current")
                     print_log(f"OVSeg filtered category_names: {[all_classes[s.get('category_id')] if s.get('category_id') < len(all_classes) else 'UNKNOWN' for s in filtered_segments_info]}", logger="current")
                 
+                if "pan" in vis_data_name and seg_output_for_vis.get("segments_info") is not None:
+                    seg_output_for_vis["segments_info"] = _panoptic_pred_segments_info_for_vis(
+                        seg_output_for_vis["segments_info"], metadata, sampled_labels=vis_sampled_labels
+                    )
+
                 visualized_image = self.visualizer.draw_predictions(
                     image,
                     data_name=vis_data_name,
