@@ -58,6 +58,10 @@ import xsam.engine.runners.loops
 
 
 #######################################################################
+#  本配置在 xsam_base_mixed_finetune_all.py 基础上，为 val_datasets 中
+#  尚未纳入 mixed 训练的数据集补充对应 train 定义，便于按 benchmark 单独微调。
+#######################################################################
+#######################################################################
 #                          PART 1  Settings                           #
 #######################################################################
 # Directories
@@ -251,6 +255,21 @@ fitrs_imgconv_image_folder = fitrs_data_root + "imgv2_split_512_100_vaild"
 # 光学图像描述数据集路径
 optical_caption_data_root = oneterra_data_root + "imgconv/image_caption/"
 reasonseg_data_root = oneterra_data_root + "reasonseg/"
+
+# 与 val_datasets 中 imgconv / refseg 评测集对应的数据根（提前定义供训练集使用）
+imgconv_cc_data_root = oneterra_data_root + "imgconv/FIT-RS/"
+rsvqa_hr_data_root = oneterra_data_root + "imgconv/VQA/RSVQA_HR/"
+rsvqa_lr_data_root = oneterra_data_root + "imgconv/VQA/RSVQA-LR/"
+optical_caption_data_root = oneterra_data_root + "imgconv/image_caption/"
+SAR_data_root = yangsen_data_root + "sar_total/"
+FuSAR_data_root = yangsen_data_root + "fusar_clip/"
+SARLANG_data_root = oneterra_data_root + "imgconv/SAR-LANG/"
+WHU_RS19_data_root = yangsen_data_root + "WHU-RS19/"
+AID_data_root = yangsen_data_root + "AID/"
+NWPU_RESISC45_data_root = yangsen_data_root + "NWPU-RESISC45/"
+SIRI_WHU_data_root = yangsen_data_root + "SIRI-WHU/"
+UC_Merced_data_root = yangsen_data_root + "UC_Merced/"
+AID_multilabel_data_root = yangsen_data_root + "AID_multilabel/"
 
 # False for predict mode, True for tensor mode
 output_ids_with_output = True
@@ -669,23 +688,356 @@ diy1_reaseg_dataset = dict(
     repeats_scale=3,
 )
 
-# Combine training datasets: geochat, genseg, ovseg, refseg, reaseg
+#######################################################################
+#  以下为 val_datasets 中有评测、但原 mixed 训练未纳入的数据集（train）
+#  原则：训练集不得与对应 test/评测 json 样本重叠（数据泄漏）。
+#  - 已剔除：与评测共用同一 data.json 的 6 个场景分类（100% 重叠，且无独立 train 文件）
+#  - 已改用 *_train_only.json：UCM/NWPU-Caption、FIT-RSRC、RSVQA-HR（去掉 debug/test 子集）
+#######################################################################
+
+# RefSegRS / RRSIS-D / RISBench train（对应 refseg_*_test 评测）
+refsegrs_refseg_train_dataset = dict(
+    type=RefSegDataset,
+    data_root=oneterra_data_root + "refseg/RefSegRS",
+    image_folder=oneterra_data_root + "refseg/RefSegRS/images",
+    dataset="refsegrs",
+    data_split="train",
+    tokenizer=tokenizer,
+    task_name="refseg",
+    data_name="refseg_refsegrs_train",
+    cond_type=cond_type,
+    special_tokens=special_tokens,
+    extra_image_processor=train_extra_image_processor,
+    image_processor=image_processor,
+    postprocess_fn=refer_seg_postprocess_fn,
+    dataset_map_fn=dict(
+        type=dataset_map_fn_factory,
+        fn=refer_seg_map_fn,
+        cond_type=cond_type,
+    ),
+    template_map_fn=dict(type=template_map_fn_factory, template=prompt_template),
+    use_variant_cat=True,
+    use_random_cat=True,
+    max_length=max_length,
+    pad_image_to_square=False,
+    ignore_label=ignore_label,
+    repeats_scale=3,
+)
+
+rrsisd_refseg_train_dataset = dict(
+    type=RefSegDataset,
+    data_root=oneterra_data_root + "refseg/RRSIS-D",
+    image_folder=oneterra_data_root + "refseg/RRSIS-D/images/rrsisd/JPEGImages",
+    dataset="rrsisd",
+    data_split="train",
+    tokenizer=tokenizer,
+    task_name="refseg",
+    data_name="refseg_rrsisd_train",
+    cond_type=cond_type,
+    special_tokens=special_tokens,
+    extra_image_processor=train_extra_image_processor,
+    image_processor=image_processor,
+    postprocess_fn=refer_seg_postprocess_fn,
+    dataset_map_fn=dict(
+        type=dataset_map_fn_factory,
+        fn=refer_seg_map_fn,
+        cond_type=cond_type,
+    ),
+    template_map_fn=dict(type=template_map_fn_factory, template=prompt_template),
+    use_variant_cat=True,
+    use_random_cat=True,
+    max_length=max_length,
+    pad_image_to_square=False,
+    ignore_label=ignore_label,
+    repeats_scale=3,
+)
+
+risbench_refseg_train_dataset = dict(
+    type=RefSegDataset,
+    data_root=oneterra_data_root + "refseg/RISBench",
+    image_folder=oneterra_data_root + "refseg/RISBench/RISBench_dataset/img_rgb",
+    dataset="risbench",
+    data_split="train",
+    tokenizer=tokenizer,
+    task_name="refseg",
+    data_name="refseg_risbench_train",
+    cond_type=cond_type,
+    special_tokens=special_tokens,
+    extra_image_processor=train_extra_image_processor,
+    image_processor=image_processor,
+    postprocess_fn=refer_seg_postprocess_fn,
+    dataset_map_fn=dict(
+        type=dataset_map_fn_factory,
+        fn=refer_seg_map_fn,
+        cond_type=cond_type,
+    ),
+    template_map_fn=dict(type=template_map_fn_factory, template=prompt_template),
+    use_variant_cat=True,
+    use_random_cat=True,
+    max_length=max_length,
+    pad_image_to_square=False,
+    ignore_label=ignore_label,
+    repeats_scale=3,
+)
+
+# Scene Classification：评测与 data.json 为同一文件（100% 重叠），不能作 train。
+# 若需按 benchmark 微调，请自行准备官方 train split 后再取消注释。
+# whu_rs19_imgconv_train_dataset = dict(
+whu_rs19_imgconv_train_dataset_DISABLED = dict(
+    type=ImgConvDataset,
+    data_path=WHU_RS19_data_root + "data.json",
+    tokenizer=tokenizer,
+    cond_type=cond_type,
+    special_tokens=special_tokens,
+    image_folder=WHU_RS19_data_root,
+    image_processor=image_processor,
+    extra_image_processor=train_extra_image_processor,
+    task_name="imgconv",
+    data_name="imgconv_WHU-RS19_train",
+    dataset_map_fn=dict(type=dataset_map_fn_factory, fn=image_conv_map_fn),
+    template_map_fn=dict(type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length,
+    pixel_values_ndim=2,
+    is_multimodal=True,
+    exclude_pure_text=True,
+    pad_image_to_square=False,
+    preprocess_text_data=True,
+    repeats_scale=1,
+)
+
+# aid_imgconv_train_dataset = dict(
+aid_imgconv_train_dataset_DISABLED = dict(
+    type=ImgConvDataset,
+    data_path=AID_data_root + "data.json",
+    tokenizer=tokenizer,
+    cond_type=cond_type,
+    special_tokens=special_tokens,
+    image_folder=AID_data_root,
+    image_processor=image_processor,
+    extra_image_processor=train_extra_image_processor,
+    task_name="imgconv",
+    data_name="imgconv_AID_train",
+    dataset_map_fn=dict(type=dataset_map_fn_factory, fn=image_conv_map_fn),
+    template_map_fn=dict(type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length,
+    pixel_values_ndim=2,
+    is_multimodal=True,
+    exclude_pure_text=True,
+    pad_image_to_square=False,
+    preprocess_text_data=True,
+    repeats_scale=1,
+)
+
+# nwpu_resisc45_imgconv_train_dataset = dict(
+nwpu_resisc45_imgconv_train_dataset_DISABLED = dict(
+    type=ImgConvDataset,
+    data_path=NWPU_RESISC45_data_root + "data.json",
+    tokenizer=tokenizer,
+    cond_type=cond_type,
+    special_tokens=special_tokens,
+    image_folder=NWPU_RESISC45_data_root,
+    image_processor=image_processor,
+    extra_image_processor=train_extra_image_processor,
+    task_name="imgconv",
+    data_name="imgconv_NWPU-RESISC45_train",
+    dataset_map_fn=dict(type=dataset_map_fn_factory, fn=image_conv_map_fn),
+    template_map_fn=dict(type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length,
+    pixel_values_ndim=2,
+    is_multimodal=True,
+    exclude_pure_text=True,
+    pad_image_to_square=False,
+    preprocess_text_data=True,
+    repeats_scale=1,
+)
+
+# siri_whu_imgconv_train_dataset = dict(
+siri_whu_imgconv_train_dataset_DISABLED = dict(
+    type=ImgConvDataset,
+    data_path=SIRI_WHU_data_root + "data.json",
+    tokenizer=tokenizer,
+    cond_type=cond_type,
+    special_tokens=special_tokens,
+    image_folder=SIRI_WHU_data_root,
+    image_processor=image_processor,
+    extra_image_processor=train_extra_image_processor,
+    task_name="imgconv",
+    data_name="imgconv_SIRI-WHU_train",
+    dataset_map_fn=dict(type=dataset_map_fn_factory, fn=image_conv_map_fn),
+    template_map_fn=dict(type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length,
+    pixel_values_ndim=2,
+    is_multimodal=True,
+    exclude_pure_text=True,
+    pad_image_to_square=False,
+    preprocess_text_data=True,
+    repeats_scale=1,
+)
+
+# uc_merced_imgconv_train_dataset = dict(
+uc_merced_imgconv_train_dataset_DISABLED = dict(
+    type=ImgConvDataset,
+    data_path=UC_Merced_data_root + "data.json",
+    tokenizer=tokenizer,
+    cond_type=cond_type,
+    special_tokens=special_tokens,
+    image_folder=UC_Merced_data_root,
+    image_processor=image_processor,
+    extra_image_processor=train_extra_image_processor,
+    task_name="imgconv",
+    data_name="imgconv_UC_Merced_train",
+    dataset_map_fn=dict(type=dataset_map_fn_factory, fn=image_conv_map_fn),
+    template_map_fn=dict(type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length,
+    pixel_values_ndim=2,
+    is_multimodal=True,
+    exclude_pure_text=True,
+    pad_image_to_square=False,
+    preprocess_text_data=True,
+    repeats_scale=1,
+)
+
+# aid_multilabel_imgconv_train_dataset = dict(
+aid_multilabel_imgconv_train_dataset_DISABLED = dict(
+    type=ImgConvDataset,
+    data_path=AID_multilabel_data_root + "data.json",
+    tokenizer=tokenizer,
+    cond_type=cond_type,
+    special_tokens=special_tokens,
+    image_folder=AID_multilabel_data_root,
+    image_processor=image_processor,
+    extra_image_processor=train_extra_image_processor,
+    task_name="imgconv",
+    data_name="imgconv_AID_multilabel_train",
+    dataset_map_fn=dict(type=dataset_map_fn_factory, fn=image_conv_map_fn),
+    template_map_fn=dict(type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length,
+    pixel_values_ndim=2,
+    is_multimodal=True,
+    exclude_pure_text=True,
+    pad_image_to_square=False,
+    preprocess_text_data=True,
+    repeats_scale=1,
+)
+
+# Image Caption train（仅用 split=train，与评测 qwenvl 无重叠）
+ucm_captions_imgconv_train_dataset = dict(
+    type=ImgConvDataset,
+    data_path=optical_caption_data_root + "UCM-Captions/dataset_qwenvl_train_only.json",
+    tokenizer=tokenizer,
+    cond_type=cond_type,
+    special_tokens=special_tokens,
+    image_folder=optical_caption_data_root + "UCM-Captions/imgs",
+    image_processor=image_processor,
+    extra_image_processor=train_extra_image_processor,
+    task_name="imgconv",
+    data_name="imgconv_UCM-Captions_train",
+    dataset_map_fn=dict(type=dataset_map_fn_factory, fn=image_conv_map_fn),
+    template_map_fn=dict(type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length,
+    pixel_values_ndim=2,
+    is_multimodal=True,
+    exclude_pure_text=True,
+    pad_image_to_square=False,
+    preprocess_text_data=True,
+    repeats_scale=1,
+)
+
+nwpu_captions_imgconv_train_dataset = dict(
+    type=ImgConvDataset,
+    data_path=optical_caption_data_root + "NWPU-Captions/dataset_nwpu_qwenvl_train_only.json",
+    tokenizer=tokenizer,
+    cond_type=cond_type,
+    special_tokens=special_tokens,
+    image_folder=optical_caption_data_root + "NWPU-Captions/NWPU_images",
+    image_processor=image_processor,
+    extra_image_processor=train_extra_image_processor,
+    task_name="imgconv",
+    data_name="imgconv_NWPU-Captions_train",
+    dataset_map_fn=dict(type=dataset_map_fn_factory, fn=image_conv_map_fn),
+    template_map_fn=dict(type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length,
+    pixel_values_ndim=2,
+    is_multimodal=True,
+    exclude_pure_text=True,
+    pad_image_to_square=False,
+    preprocess_text_data=True,
+    repeats_scale=1,
+)
+
+# FIT-RSRC / RSVQA train（已剔除评测 debug 子集，避免泄漏）
+fitrsrc_imgconv_train_dataset = dict(
+    type=ImgConvDataset,
+    data_path=imgconv_cc_data_root + "FIT-RSRC/FIT-RSRC_Questions_2k_qwenvl_train_only.json",
+    tokenizer=tokenizer,
+    cond_type=cond_type,
+    special_tokens=special_tokens,
+    image_folder=imgconv_cc_data_root + "raw_data/imgv2_split_512_100_vaild",
+    image_processor=image_processor,
+    extra_image_processor=train_extra_image_processor,
+    task_name="imgconv",
+    data_name="imgconv_FIT-RSRC_train",
+    dataset_map_fn=dict(type=dataset_map_fn_factory, fn=image_conv_map_fn),
+    template_map_fn=dict(type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length,
+    pixel_values_ndim=2,
+    is_multimodal=True,
+    exclude_pure_text=True,
+    pad_image_to_square=False,
+    preprocess_text_data=True,
+    repeats_scale=1,
+)
+
+rsvqa_hr_imgconv_train_dataset = dict(
+    type=ImgConvDataset,
+    data_path=imgconv_cc_data_root + "FIT-RSFG/FIT-RSFG-Bench/hrben_qwenvl_train_only.json",
+    tokenizer=tokenizer,
+    cond_type=cond_type,
+    special_tokens=special_tokens,
+    image_folder=rsvqa_hr_data_root + "Data",
+    image_processor=image_processor,
+    extra_image_processor=train_extra_image_processor,
+    task_name="imgconv",
+    data_name="imgconv_RSVQA_HR_train",
+    dataset_map_fn=dict(type=dataset_map_fn_factory, fn=image_conv_map_fn),
+    template_map_fn=dict(type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length,
+    pixel_values_ndim=2,
+    is_multimodal=True,
+    exclude_pure_text=True,
+    pad_image_to_square=False,
+    preprocess_text_data=True,
+    repeats_scale=1,
+)
+
+rsvqa_lr_imgconv_train_dataset = dict(
+    type=ImgConvDataset,
+    data_path=rsvqa_lr_data_root + "train_cleaned.json",
+    tokenizer=tokenizer,
+    cond_type=cond_type,
+    special_tokens=special_tokens,
+    image_folder=rsvqa_lr_data_root + "Images_LR",
+    image_processor=image_processor,
+    extra_image_processor=train_extra_image_processor,
+    task_name="imgconv",
+    data_name="imgconv_RSVQA_LR_train",
+    dataset_map_fn=dict(type=dataset_map_fn_factory, fn=image_conv_map_fn),
+    template_map_fn=dict(type=template_map_fn_factory, template=prompt_template),
+    max_length=max_length,
+    pixel_values_ndim=2,
+    is_multimodal=True,
+    exclude_pure_text=True,
+    pad_image_to_square=False,
+    preprocess_text_data=True,
+    repeats_scale=1,
+)
+
+# Combine training datasets: geochat, genseg, ovseg, refseg, reaseg + eval-aligned train
 # 注意：使用repeats_scale后，oversample_ratio会被覆盖，设为0.0禁用自动平衡
 combined_train_dataset = dict(
     type=ConcatDataset,
     oversample_ratio=0.0,  # 设为0.0，使用手动设置的repeats_scale
     datasets=[
-        # FIT-RS imgconv训练数据集
-        # Scene Classification imgconv训练数据集（从验证配置转换）
-        # whu_rs19_imgconv_dataset,
-        # aid_imgconv_dataset,
-        # nwpu_resisc45_imgconv_dataset,
-        # siri_whu_imgconv_dataset,
-        # uc_merced_imgconv_dataset,
-        # aid_multilabel_imgconv_dataset,
-        # # Image Caption imgconv训练数据集（从验证配置转换）
-        # ucm_captions_imgconv_dataset,
-        # nwpu_captions_imgconv_dataset,
         geochat_imgconv_dataset,
         fitrs_complexcompre_imgconv_dataset,
         fitrs_imagecaption_imgconv_dataset,
@@ -703,6 +1055,17 @@ combined_train_dataset = dict(
         # 推理分割任务
         earthreason_reaseg_dataset,
         diy1_reaseg_dataset,
+        # 评测对齐：refseg（RefSegRS / RRSIS-D / RISBench train）
+        refsegrs_refseg_train_dataset,
+        rrsisd_refseg_train_dataset,
+        risbench_refseg_train_dataset,
+        # 评测对齐：imgconv caption / VQA（无 test 重叠）
+        # 场景分类 6 项与评测 data.json 100% 重叠，已禁用，见上方 *_DISABLED 定义
+        ucm_captions_imgconv_train_dataset,
+        nwpu_captions_imgconv_train_dataset,
+        fitrsrc_imgconv_train_dataset,
+        rsvqa_hr_imgconv_train_dataset,
+        rsvqa_lr_imgconv_train_dataset,
     ],
 )
 
@@ -1893,10 +2256,10 @@ val_evaluators = [
     ),
 ]
 
-# 临时只跑 refseg_rrsisd_test：其余评测集在这里统一过滤掉。
-_eval_target_data_name = "reaseg_earthreason_test"
-val_datasets = [dataset for dataset in val_datasets if dataset.get("data_name") == _eval_target_data_name]
-val_evaluators = [evaluator for evaluator in val_evaluators if evaluator.get("data_name") == _eval_target_data_name]
+# 评测集过滤：按需取消注释并设置 _eval_target_data_name，可只跑单个 benchmark。
+# _eval_target_data_name = "reaseg_earthreason_test"
+# val_datasets = [d for d in val_datasets if d.get("data_name") == _eval_target_data_name]
+# val_evaluators = [e for e in val_evaluators if e.get("data_name") == _eval_target_data_name]
 
 vis_datasets = deepcopy(val_datasets)
 for dataset in vis_datasets:
