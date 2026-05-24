@@ -48,6 +48,7 @@ from xsam.utils.logging import print_log, set_default_logging_format
 from xsam.utils.misc import data_dict_to_device
 from xsam.utils.utils import register_function
 from xsam.dataset.utils.process import sem_seg_postprocess
+from xsam.structures import BitMasks, Instances
 from xsam.utils.visualize import Visualizer as XSamVisualizer
 
 # Global setup
@@ -317,14 +318,58 @@ def prepare_gt_data_refseg(mask_gt,class_gt,segmentation_output, scaled_size):
     gt = {"segmentation": mask_gt, "segments_info": segments_info_gt}
     return gt
 
+
+def prepare_gt_data_instance(mask_gt, class_gt, segmentation_output, scaled_size):
+    if mask_gt is None or class_gt is None or class_gt.numel() == 0:
+        return None
+
+    target_hw = None
+    instances_out = segmentation_output.get("instances")
+    if instances_out is not None:
+        target_hw = tuple(instances_out.image_size)
+
+    if target_hw is None:
+        pred_seg = segmentation_output.get("segmentation")
+        if isinstance(pred_seg, torch.Tensor):
+            target_hw = tuple(int(x) for x in pred_seg.shape[-2:])
+        elif isinstance(pred_seg, (list, tuple)) and len(pred_seg) > 0:
+            first = pred_seg[0]
+            if isinstance(first, torch.Tensor):
+                target_hw = tuple(int(x) for x in first.shape[-2:])
+
+    if target_hw is None and isinstance(mask_gt, torch.Tensor):
+        if mask_gt.ndim == 3:
+            target_hw = tuple(int(x) for x in mask_gt.shape[-2:])
+        elif mask_gt.ndim == 2:
+            target_hw = tuple(int(x) for x in mask_gt.shape)
+
+    if target_hw is None:
+        return None
+
+    masks = resize_mask_gt(mask_gt, target_hw, scaled_size)
+    if masks.ndim == 2:
+        masks = masks.unsqueeze(0)
+
+    image_size = (int(target_hw[0]), int(target_hw[1]))
+    instances = Instances(image_size)
+    instances.pred_masks = masks > 0
+    instances.pred_classes = class_gt.to(device=masks.device, dtype=torch.long)
+    instances.scores = torch.ones(class_gt.shape[0], device=masks.device, dtype=torch.float32)
+    instances.pred_boxes = BitMasks(instances.pred_masks).get_bounding_boxes()
+    return {"instances": instances}
+
+
 def prepare_gt_data(mask_gt, class_gt, segmentation_output, metadata, data_name, scaled_size, image_info=None):
-    if "genseg" in data_name and "pan" in data_name:
+    gt = None
+    if "instance" in data_name:
+        gt = prepare_gt_data_instance(mask_gt, class_gt, segmentation_output, scaled_size)
+    elif "genseg" in data_name and "pan" in data_name:
         gt = prepare_gt_data_pan(mask_gt, class_gt, segmentation_output, metadata, scaled_size, image_info=image_info)
     elif "ovseg" in data_name and "pan" in data_name:
         gt = prepare_gt_data_pan(mask_gt, class_gt, segmentation_output, metadata, scaled_size, image_info=image_info)
     elif "refseg" in data_name or "reaseg" in data_name:
-        gt = prepare_gt_data_refseg(mask_gt,class_gt,segmentation_output, scaled_size)
-    
+        gt = prepare_gt_data_refseg(mask_gt, class_gt, segmentation_output, scaled_size)
+
     return gt
 
 
@@ -415,9 +460,18 @@ def evaluate_dataset(
                     per_sample_labels = sampled_labels_batch[i]
                 gt_image_info = {**image_info, "sampled_labels": per_sample_labels} if per_sample_labels is not None else image_info
 
-                gt = prepare_gt_data(
-                    mask_gt, class_gt, segmentation_output, metadata, data_name, scaled_size, image_info=gt_image_info
-                )
+                try:
+                    gt = prepare_gt_data(
+                        mask_gt, class_gt, segmentation_output, metadata, data_name, scaled_size, image_info=gt_image_info
+                    )
+                except Exception as e:
+                    print_log(
+                        f"Error preparing ground truth for {file_name}: {e}\n{traceback.format_exc()}",
+                        logger="current",
+                    )
+                    continue
+                if gt is None:
+                    continue
                 try:
                     visualizer.draw_predictions(
                         image,

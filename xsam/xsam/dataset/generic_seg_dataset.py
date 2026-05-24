@@ -17,6 +17,7 @@ from ..utils.palette import get_palette
 from .base_dataset import BaseDataset
 from .utils.catalog import MetadataCatalog
 from .utils.coco import COCO
+from .utils.detection import normalize_detection_annotation
 from .utils.mask import decode_mask
 
 SPECIAL_TOKENS = [DEFAULT_PEND_TOKEN, DEFAULT_PSTART_TOKEN, DEFAULT_SEG_TOKEN]
@@ -71,7 +72,9 @@ class GenericSegDataset(BaseDataset):
         cat_id_to_name = {x["id"]: x["name"] for x in cats}
         cat_id_to_color = {x["id"]: cat_colors[dataset_id_to_contiguous_id[x["id"]]] for x in cats}
 
-        thing_cats = [x for x in cats]
+        thing_cats = [x for x in cats if x.get("isthing", 1) == 1]
+        if len(thing_cats) == 0:
+            thing_cats = [x for x in cats]
         thing_cat_ids = [x["id"] for x in thing_cats]
         thing_cat_id_to_contiguous_id = {
             cat_id: cont_id for cont_id, cat_id in enumerate(cat_ids) if cat_id in thing_cat_ids
@@ -158,7 +161,7 @@ class GenericSegDataset(BaseDataset):
     def _set_metadata(self, coco_data, **kwargs):
         if "semantic" in self.data_name:
             self._set_semantic_metadata(coco_data, **kwargs)
-        elif "instance" in self.data_name:
+        elif "detection" in self.data_name or "instance" in self.data_name:
             self._set_instance_metadata(coco_data, **kwargs)
         elif "panoptic" in self.data_name:
             self._set_panoptic_metadata(coco_data, **kwargs)
@@ -330,7 +333,11 @@ class GenericSegDataset(BaseDataset):
                         "image_info": img_info,
                     }
                 )
-        elif "instance" in self.data_name:
+        elif "detection" in self.data_name or "instance" in self.data_name:
+            require_segmentation = "instance" in self.data_name
+            thing_dataset_ids = None
+            if "detection" in self.data_name:
+                thing_dataset_ids = {c["id"] for c in cats if c.get("isthing", 1) == 1}
             coco_api = COCO(dataset=coco_data)
             img_ids = sorted(coco_api.getImgIds())
             for img_id in img_ids:
@@ -347,24 +354,11 @@ class GenericSegDataset(BaseDataset):
 
                 anns = []
                 for ann in _anns:
-                    if int(ann.get("iscrowd", 0)) != 0:
+                    if thing_dataset_ids is not None and ann["category_id"] not in thing_dataset_ids:
                         continue
-
-                    segmentation = ann["segmentation"]
-                    if isinstance(segmentation, dict):
-                        if isinstance(segmentation["counts"], list):
-                            # convert to compressed RLE
-                            segmentation = mask_utils.frPyObjects(segmentation["counts"], *segmentation["size"])
-                        segmentation["counts"] = segmentation["counts"].decode("utf-8")
-                    else:
-                        # filter out invalid polygons (< 3 points)
-                        segmentation = [poly for poly in segmentation if len(poly) % 2 == 0 and len(poly) >= 6]
-                        if len(segmentation) == 0:
-                            continue  # ignore this instance
-
-                    ann["segmentation"] = segmentation
-                    ann["bbox_mode"] = BoxMode.XYWH_ABS
-                    anns.append(ann)
+                    normalized = normalize_detection_annotation(ann, require_segmentation=require_segmentation)
+                    if normalized is not None:
+                        anns.append(normalized)
 
                 if len(anns) == 0:
                     self.woann_cnt += 1
@@ -380,6 +374,8 @@ class GenericSegDataset(BaseDataset):
                     "height": _img_info["height"],
                     "width": _img_info["width"],
                 }
+                if "detection" in self.data_name:
+                    img_info["gt_annotations"] = sampled_anns
 
                 rets.append(
                     {
@@ -396,7 +392,7 @@ class GenericSegDataset(BaseDataset):
         else:
             raise ValueError(f"Invalid dataset type: {self.data_name}")
 
-        if self.data_mode == "eval" and "instance" in self.data_name:
+        if self.data_mode == "eval" and ("instance" in self.data_name or "detection" in self.data_name):
             base_tmp = tempfile.gettempdir()
             cache_dir = osp.join(base_tmp, "xsam_cache")
             os.makedirs(cache_dir, exist_ok=True)
@@ -443,6 +439,35 @@ class GenericSegDataset(BaseDataset):
 
             mask_labels = torch.stack([torch.from_numpy(np.ascontiguousarray(x.copy())) for x in mask_labels])
             class_labels = torch.tensor(np.array(class_labels), dtype=torch.int64)
+
+            data_dict.update(
+                {
+                    "mask_labels": mask_labels,
+                    "class_labels": class_labels,
+                }
+            )
+        elif "detection" in self.data_name:
+            height, width = data_dict["image_size"]
+            annotations = data_dict["annotations"]
+            if self.data_mode != "train":
+                mask_labels = torch.zeros((0, height, width))
+                class_labels = torch.zeros((0,), dtype=torch.int64)
+            else:
+                mask_labels = []
+                class_labels = []
+                for ann in annotations:
+                    segmentation = ann.get("segmentation")
+                    if segmentation is None:
+                        continue
+                    binary_mask = decode_mask(segmentation, height, width)
+                    mask_labels.append(binary_mask)
+                    class_labels.append(ann["category_id"])
+                if mask_labels:
+                    mask_labels = torch.stack([torch.from_numpy(np.ascontiguousarray(x.copy())) for x in mask_labels])
+                    class_labels = torch.tensor(np.array(class_labels), dtype=torch.int64)
+                else:
+                    mask_labels = torch.zeros((0, height, width))
+                    class_labels = torch.zeros((0,), dtype=torch.int64)
 
             data_dict.update(
                 {

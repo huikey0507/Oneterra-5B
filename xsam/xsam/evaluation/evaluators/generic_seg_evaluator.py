@@ -18,9 +18,11 @@ from xsam.utils.logging import print_log
 from ...dataset.utils.catalog import MetadataCatalog
 from ...dataset.utils.coco import COCO
 from ..utils import comm
-from ..utils.map import convert_to_coco_json, derive_coco_results, evaluate_predictions_on_coco, instances_to_coco_json
+from ..utils.map import convert_to_coco_json, create_small_table, derive_coco_results, evaluate_predictions_on_coco, instances_to_coco_json
 from ..utils.pq import pq_compute, print_panoptic_results
+from ..utils.rbox_eval import build_rbox_eval_inputs, detect_gt_bbox_type
 from .base_seg_evaluator import BaseSegEvaluator
+from .eval_map import eval_rbbox_map_coco_metrics
 
 
 class GenericSegEvaluator(BaseSegEvaluator):
@@ -125,8 +127,10 @@ class GenericSegEvaluator(BaseSegEvaluator):
             if sampled_labels is not None:
                 unique_labels = np.unique(pred).tolist()
                 for unique_label in unique_labels:
-                    if sampled_labels is not None:
-                        pred[pred == unique_label] = sampled_labels[unique_label] - label_shift
+                    ul = int(unique_label)
+                    if ul < 0 or ul >= len(sampled_labels):
+                        continue
+                    pred[pred == ul] = sampled_labels[ul] - label_shift
 
             file_name = input["file_name"]
             file_name_semseg = os.path.splitext(file_name)[0] + semseg_sufix
@@ -151,6 +155,124 @@ class GenericSegEvaluator(BaseSegEvaluator):
                 prediction["proposals"] = output["proposals"].to(self._cpu_device)
             if len(prediction) > 1:
                 self._predictions.append(prediction)
+
+    def detection_process(self, inputs, outputs):
+        """Collect bbox predictions for pure object detection evaluation."""
+        self.instance_process(inputs, outputs)
+
+    def _remap_coco_detection_results(self, predictions):
+        dataset_id_to_contiguous_id = self._metadata.thing_dataset_id_to_contiguous_id
+        all_contiguous_ids = list(dataset_id_to_contiguous_id.values())
+        num_classes = len(all_contiguous_ids)
+        assert min(all_contiguous_ids) == 0 and max(all_contiguous_ids) == num_classes - 1
+
+        reverse_id_mapping = {v: k for k, v in dataset_id_to_contiguous_id.items()}
+        coco_results = list(itertools.chain(*[x["instances"] for x in predictions]))
+        new_coco_results = []
+        dropped_invalid_category = 0
+        for result in coco_results:
+            category_id = result["category_id"]
+            if category_id not in reverse_id_mapping:
+                dropped_invalid_category += 1
+                continue
+            result = dict(result)
+            result["category_id"] = reverse_id_mapping[category_id]
+            new_coco_results.append(result)
+
+        if dropped_invalid_category > 0:
+            print_log(
+                f"{self.data_name}: dropped {dropped_invalid_category} detection predictions with "
+                f"category_id not in thing contiguous mapping [0, {num_classes - 1}].",
+                logger="current",
+            )
+        if len(coco_results) > 0 and len(new_coco_results) == 0:
+            print_log(
+                f"{self.data_name}: all {len(coco_results)} detection predictions were filtered before eval; "
+                "check postprocess class indices vs metadata.thing_dataset_id_to_contiguous_id.",
+                logger="current",
+            )
+        return new_coco_results, num_classes, dataset_id_to_contiguous_id
+
+    def _thing_class_names(self):
+        thing_classes = self._metadata.get("thing_classes")
+        if thing_classes is None:
+            return None
+        if isinstance(thing_classes, dict):
+            return [thing_classes[k] for k in sorted(thing_classes.keys())]
+        return list(thing_classes)
+
+    def detection_evaluate(self, predictions):
+        if self._output_dir:
+            os.makedirs(self._output_dir, exist_ok=True)
+            file_path = os.path.join(self._output_dir, "predictions.json")
+            print_log(f"Writing {self.data_name} predictions to {self._output_dir}...", logger="current")
+            with open(file_path, "w") as f:
+                json.dump(predictions, f)
+
+        with open(osp.realpath(self._metadata.gt_json), "r") as f:
+            gt_anns = json.load(f)
+
+        thing_contiguous = set(self._metadata.thing_dataset_id_to_contiguous_id.values())
+        for gt_item in gt_anns:
+            gt_item["annotations"] = [
+                ann for ann in gt_item.get("annotations", []) if int(ann.get("category_id", -1)) in thing_contiguous
+            ]
+
+        new_coco_results, num_classes, dataset_id_to_contiguous_id = self._remap_coco_detection_results(predictions)
+        gt_bbox_type = detect_gt_bbox_type(gt_anns, self._metadata)
+        class_names = self._thing_class_names()
+        print_log(
+            f"{self.data_name}: detected GT bbox type = {gt_bbox_type} "
+            f"({'COCO horizontal bbox' if gt_bbox_type == 'hbox' else 'rotated bbox'} eval will be used)",
+            logger="current",
+        )
+
+        if len(new_coco_results) == 0:
+            det_table = create_small_table({"mAP": float("nan"), "AP50": float("nan"), "AP75": float("nan")})
+            det_title = (
+                "Object Detection (horizontal bbox)"
+                if gt_bbox_type == "hbox"
+                else "Object Detection (rotated bbox)"
+            )
+            return f"=== {det_title} ===\n{det_table}"
+
+        if gt_bbox_type == "hbox":
+            print_log(f"Trying to convert '{self.data_name}' to COCO format...", logger="current")
+            cache_path = osp.join(self._output_dir, f"{self.data_name}_coco_format.json")
+            convert_to_coco_json(self.data_name, cache_path, gt_anns, allow_cached=False)
+            coco_api = COCO(cache_path)
+            bbox_coco_eval = evaluate_predictions_on_coco(coco_api, new_coco_results, "bbox")
+            det_table = derive_coco_results(
+                bbox_coco_eval, "bbox", class_names=class_names, show_categories=self._show_categories
+            )
+        else:
+            category_id_to_contiguous = {
+                dataset_id: contiguous_id for dataset_id, contiguous_id in dataset_id_to_contiguous_id.items()
+            }
+            predictions_remapped = []
+            for gt_item in gt_anns:
+                image_id = gt_item["image_id"]
+                instances = [r for r in new_coco_results if r["image_id"] == image_id]
+                predictions_remapped.append({"image_id": image_id, "instances": instances})
+            det_results, rbbox_annotations = build_rbox_eval_inputs(
+                gt_anns,
+                predictions_remapped,
+                num_classes,
+                category_id_to_contiguous,
+            )
+            det_table = eval_rbbox_map_coco_metrics(
+                det_results,
+                rbbox_annotations,
+                dataset=class_names,
+                show_categories=self._show_categories,
+            )
+
+        det_title = (
+            "Object Detection (horizontal bbox)"
+            if gt_bbox_type == "hbox"
+            else "Object Detection (rotated bbox)"
+        )
+        return f"=== {det_title} ===\n{det_table}"
 
     def panoptic_process(self, inputs, outputs):
         from panopticapi.utils import id2rgb
@@ -218,12 +340,26 @@ class GenericSegEvaluator(BaseSegEvaluator):
 
         acc = np.full(self._num_classes, np.nan, dtype=np.float32)
         iou = np.full(self._num_classes, np.nan, dtype=np.float32)
+        precision = np.full(self._num_classes, np.nan, dtype=np.float32)
+        recall = np.full(self._num_classes, np.nan, dtype=np.float32)
+        f1 = np.full(self._num_classes, np.nan, dtype=np.float32)
         tp = self._conf_matrix.diagonal()[:-1].astype(np.float32)
         pos_gt = np.sum(self._conf_matrix[:-1, :-1], axis=0).astype(np.float32)
         class_weights = pos_gt / np.sum(pos_gt)
         pos_pred = np.sum(self._conf_matrix[:-1, :-1], axis=1).astype(np.float32)
         acc_valid = pos_gt > 0
         acc[acc_valid] = tp[acc_valid] / pos_gt[acc_valid]
+        recall[acc_valid] = acc[acc_valid]
+        precision[acc_valid] = np.where(
+            pos_pred[acc_valid] > 0,
+            tp[acc_valid] / pos_pred[acc_valid],
+            0.0,
+        )
+        f1[acc_valid] = np.where(
+            (precision[acc_valid] + recall[acc_valid]) > 0,
+            2 * precision[acc_valid] * recall[acc_valid] / (precision[acc_valid] + recall[acc_valid]),
+            0.0,
+        )
         union = pos_gt + pos_pred - tp
         iou_valid = np.logical_and(acc_valid, union > 0)
         iou[iou_valid] = tp[iou_valid] / union[iou_valid]
@@ -231,6 +367,9 @@ class GenericSegEvaluator(BaseSegEvaluator):
         miou = np.sum(iou[iou_valid]) / np.sum(iou_valid)
         fiou = np.sum(iou[iou_valid] * class_weights[iou_valid])
         pacc = np.sum(tp) / np.sum(pos_gt)
+        mprecision = np.sum(precision[acc_valid]) / np.sum(acc_valid)
+        mrecall = macc
+        mf1 = np.sum(f1[acc_valid]) / np.sum(acc_valid)
 
         data = []
         headers = ["Metric", "Value (%)"]
@@ -240,13 +379,37 @@ class GenericSegEvaluator(BaseSegEvaluator):
                 ["fwIoU", f"{100 * fiou:.2f}"],
                 ["mACC", f"{100 * macc:.2f}"],
                 ["pACC", f"{100 * pacc:.2f}"],
+                ["mF1", f"{100 * mf1:.2f}"],
+                ["mPrecision", f"{100 * mprecision:.2f}"],
+                ["mRecall", f"{100 * mrecall:.2f}"],
             ]
         )
 
-        if self._show_categories:
-            class_names = [self._metadata.dataset_classes[k] for k in sorted(self._metadata.dataset_classes)]
-            for i, name in enumerate(class_names):
-                data.extend([[f"IoU-{name}", f"{100 * iou[i]:.2f}"], [f"ACC-{name}", f"{100 * acc[i]:.2f}"]])
+        def _format_pct(value):
+            return f"{100 * value:.2f}" if np.isfinite(value) else "nan"
+
+        def _class_name(contiguous_id):
+            dataset_id = self._contiguous_id_to_dataset_id.get(contiguous_id, contiguous_id)
+            if hasattr(self._metadata, "dataset_classes") and self._metadata.dataset_classes:
+                return self._metadata.dataset_classes.get(dataset_id, str(dataset_id))
+            return str(contiguous_id)
+
+        for i in range(self._num_classes):
+            name = _class_name(i)
+            data.extend(
+                [
+                    [f"IoU-{name}", _format_pct(iou[i])],
+                    [f"ACC-{name}", _format_pct(acc[i])],
+                ]
+            )
+            if self._show_categories:
+                data.extend(
+                    [
+                        [f"F1-{name}", _format_pct(f1[i])],
+                        [f"Precision-{name}", _format_pct(precision[i])],
+                        [f"Recall-{name}", _format_pct(recall[i])],
+                    ]
+                )
 
         table = tabulate(
             data,
@@ -274,27 +437,7 @@ class GenericSegEvaluator(BaseSegEvaluator):
         convert_to_coco_json(self.data_name, cache_path, gt_anns, allow_cached=False)
         coco_api = COCO(cache_path)
 
-        coco_results = list(itertools.chain(*[x["instances"] for x in predictions]))
-        # unmap the category ids for COCO
-        dataset_id_to_contiguous_id = self._metadata.thing_dataset_id_to_contiguous_id
-        all_contiguous_ids = list(dataset_id_to_contiguous_id.values())
-        num_classes = len(all_contiguous_ids)
-        assert min(all_contiguous_ids) == 0 and max(all_contiguous_ids) == num_classes - 1
-
-        reverse_id_mapping = {v: k for k, v in dataset_id_to_contiguous_id.items()}
-        new_coco_results = []
-        for result in coco_results:
-            category_id = result["category_id"]
-            if category_id not in reverse_id_mapping:
-                # print_log(
-                #     f"A prediction has class={category_id}, "
-                #     f"but the dataset only has {num_classes} classes and "
-                #     f"predicted class id should be in [0, {num_classes - 1}].",
-                #     logger="current",
-                # )b
-                continue
-            result["category_id"] = reverse_id_mapping[category_id]
-            new_coco_results.append(result)
+        new_coco_results, _, _ = self._remap_coco_detection_results(predictions)
 
         coco_eval = (
             evaluate_predictions_on_coco(
@@ -303,12 +446,12 @@ class GenericSegEvaluator(BaseSegEvaluator):
                 "segm",
             )
             if len(new_coco_results) > 0
-            else None  # cocoapi does not handle empty results very well
+            else None
         )
-        table = derive_coco_results(
+        segm_table = derive_coco_results(
             coco_eval, "segm", class_names=self._metadata.get("thing_classes"), show_categories=self._show_categories
         )
-        return table
+        return f"=== Instance Segmentation (mask) ===\n{segm_table}"
 
     def panoptic_evaluate(self, predictions):
         # PanopticApi requires local files
@@ -346,6 +489,8 @@ class GenericSegEvaluator(BaseSegEvaluator):
             self.panoptic_process(inputs, outputs)
         elif "semantic" in self.data_name:
             self.semantic_process(inputs, outputs)
+        elif "detection" in self.data_name:
+            self.detection_process(inputs, outputs)
         elif "instance" in self.data_name:
             self.instance_process(inputs, outputs)
         else:
@@ -372,6 +517,8 @@ class GenericSegEvaluator(BaseSegEvaluator):
             table = self.panoptic_evaluate(predictions)
         elif "semantic" in self.data_name:
             table = self.semantic_evaluate(predictions)
+        elif "detection" in self.data_name:
+            table = self.detection_evaluate(predictions)
         elif "instance" in self.data_name:
             table = self.instance_evaluate(predictions)
         else:

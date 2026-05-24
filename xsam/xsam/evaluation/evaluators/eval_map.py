@@ -299,6 +299,63 @@ def eval_rbbox_map(det_results,
     return mean_ap, eval_results
 
 
+def eval_rbbox_map_coco_metrics(
+    det_results,
+    annotations,
+    dataset=None,
+    nproc=4,
+    show_categories=False,
+):
+    """Compute COCO-style mAP / AP50 / AP75 for rotated boxes.
+
+    mAP is averaged over IoU thresholds [0.50, 0.55, ..., 0.95].
+    """
+    from ..utils.map import create_small_table
+    from tabulate import tabulate
+
+    iou_thresholds = np.linspace(0.5, 0.95, 10)
+    ap_per_iou = []
+    eval_results_at_50 = None
+    for idx, iou_thr in enumerate(iou_thresholds):
+        mean_ap, eval_results = eval_rbbox_map(
+            det_results,
+            annotations,
+            iou_thr=float(iou_thr),
+            dataset=dataset,
+            logger="silent",
+            nproc=nproc,
+        )
+        ap_per_iou.append(mean_ap)
+        if idx == 0:
+            eval_results_at_50 = eval_results
+
+    ap_per_iou = np.asarray(ap_per_iou, dtype=np.float32)
+    summary = {
+        "mAP": float(ap_per_iou.mean() * 100),
+        "AP50": float(ap_per_iou[0] * 100),
+        "AP75": float(ap_per_iou[5] * 100),
+    }
+    summary_table = create_small_table(summary)
+
+    if not show_categories or eval_results_at_50 is None or dataset is None:
+        return summary_table
+
+    category_rows = []
+    for idx, name in enumerate(dataset):
+        ap = eval_results_at_50[idx]["ap"]
+        ap_val = float(ap * 100) if np.isfinite(ap) else float("nan")
+        category_rows.append([name, f"{ap_val:.2f}"])
+
+    category_table = tabulate(
+        category_rows,
+        headers=["category", "AP50"],
+        tablefmt="outline",
+        stralign="center",
+        numalign="center",
+    )
+    return f"{summary_table}\n{category_table}"
+
+
 def print_map_summary(mean_ap,
                       results,
                       dataset=None,

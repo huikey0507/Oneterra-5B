@@ -698,7 +698,7 @@ class Visualizer:
     def draw_gen_seg(self, data_name, **kwargs):
         if "sem" in data_name:
             return self.draw_sem_seg(**kwargs)
-        elif "ins" in data_name:
+        elif "detection" in data_name or "ins" in data_name:
             return self.draw_ins_seg(**kwargs)
         elif "pan" in data_name:
             return self.draw_pan_seg(**kwargs)

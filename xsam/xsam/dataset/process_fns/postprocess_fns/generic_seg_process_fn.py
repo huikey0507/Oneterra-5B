@@ -16,6 +16,31 @@ _OVSEG_DEBUG_PRINT_COUNT = 0
 _OVSEG_DEBUG_MAX_PRINT = 20
 
 
+def _filter_detection_instances(instances, score_thr: float, nms_thr: float = 0.5):
+    """按分数阈值 + 逐类 NMS 去重，避免 Mask2Former 多 query 重复框。"""
+    if instances is None or len(instances) == 0:
+        return instances
+    # pred_boxes 来自 BitMasks.get_bounding_boxes()，默认在 CPU；scores 可能在 GPU
+    instances = instances.to("cpu")
+    keep = instances.scores >= score_thr
+    if not keep.any():
+        return instances[keep]
+    instances = instances[keep]
+    if len(instances) == 0:
+        return instances
+
+    try:
+        from torchvision.ops import batched_nms
+    except ImportError:
+        return instances
+
+    boxes = instances.pred_boxes.tensor
+    scores = instances.scores
+    classes = instances.pred_classes
+    keep_idx = batched_nms(boxes, scores, classes, nms_thr)
+    return instances[keep_idx]
+
+
 def generic_seg_postprocess_fn(
     outputs,
     image_sizes,
@@ -80,6 +105,7 @@ def generic_seg_postprocess_fn(
         batch_size = class_queries_logits.shape[0]
         num_classes = class_queries_logits.shape[-1] - 1
         num_queries = class_queries_logits.shape[-2]
+        sampled_labels = kwargs.get("sampled_labels", None)
 
         # Loop over items in batch size
         results: List[Dict[str, TensorType]] = []
@@ -150,6 +176,7 @@ def generic_seg_postprocess_fn(
                     "segmentation": segmentation,
                     "segments_info": segments,
                     "instances": instances,
+                    "sampled_labels": sampled_labels[i] if sampled_labels is not None else None,
                 }
             )
         return results
@@ -315,5 +342,26 @@ def generic_seg_postprocess_fn(
             return_binary_maps,
             **kwargs,
         )
+    elif "det" in task_name:
+        return_coco_annotation = kwargs.pop("return_coco_annotation", True)
+        return_binary_maps = kwargs.pop("return_binary_maps", False)
+        nms_threshold = kwargs.pop("nms_threshold", 0.5)
+        # detection 默认至少 0.05 分，避免 threshold=0 时保留大量 0% 重复框
+        score_thr = threshold if threshold > 0 else kwargs.pop("min_score", 0.05)
+        results = _instance_genseg_postprocess(
+            outputs,
+            image_sizes,
+            scaled_sizes,
+            0.0,
+            return_coco_annotation,
+            return_binary_maps,
+            **kwargs,
+        )
+        for result in results:
+            if result.get("instances") is not None:
+                result["instances"] = _filter_detection_instances(
+                    result["instances"], score_thr=score_thr, nms_thr=nms_threshold
+                )
+        return results
     else:
         raise ValueError(f"Task name {task_name} not supported")

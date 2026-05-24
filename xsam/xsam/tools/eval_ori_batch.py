@@ -25,9 +25,11 @@ if xsam_dir not in sys.path:
 import re
 import traceback
 import warnings
-from typing import Dict, Optional, Tuple
+import math
+from typing import Dict, List, Optional, Tuple
 
 import torch
+from PIL import Image
 from mmengine.config import Config, DictAction
 from mmengine.runner.utils import set_random_seed
 from torch.utils.data import DataLoader, DistributedSampler
@@ -45,7 +47,9 @@ from xsam.utils.logging import print_log, set_default_logging_format
 from xsam.utils.misc import data_dict_to_device
 from xsam.utils.utils import register_function
 from xsam.dataset.utils.process import sem_seg_postprocess
-from xsam.utils.visualize import Visualizer as XSamVisualizer
+from xsam.structures import BitMasks, Boxes, BoxMode, Instances, RotatedBoxes
+from xsam.utils.visualize import Visualizer
+from xsam.utils.visualize_eval import EvalVisualizer
 
 # Global setup
 set_default_logging_format()
@@ -53,16 +57,20 @@ warnings.filterwarnings("ignore")
 
 
 def _build_visualizer_from_cfg(cfg):
-    """Build xsam Visualizer; cfg often uses dict(type=Visualizer, ...) which is not always BUILDER-registered."""
+    """评测使用 EvalVisualizer，与 demo 的 Visualizer 解耦。"""
     if not hasattr(cfg, "visualizer") or cfg.visualizer is None:
         return None
     vis_cfg = cfg.visualizer
     if isinstance(vis_cfg, dict):
         vis_type = vis_cfg.get("type")
+        kwargs = {k: v for k, v in vis_cfg.items() if k != "type"}
+        if vis_type is EvalVisualizer:
+            return EvalVisualizer(**kwargs)
+        if vis_type is Visualizer:
+            return EvalVisualizer(**kwargs)
         if vis_type is not None and not isinstance(vis_type, str):
-            kwargs = {k: v for k, v in vis_cfg.items() if k != "type"}
             return vis_type(**kwargs)
-    return BUILDER.build(cfg.visualizer)
+    return EvalVisualizer()
 
 
 def parse_args() -> argparse.Namespace:
@@ -321,14 +329,158 @@ def prepare_gt_data_refseg(mask_gt,class_gt,segmentation_output, scaled_size):
     gt = {"segmentation": mask_gt, "segments_info": segments_info_gt}
     return gt
 
+
+def prepare_gt_data_semantic(segmentation_output, metadata, scaled_size, image_info):
+    """Semantic OVSeg：GT 从 semseg_map_folder 读取（dataloader 在 eval 时不带 mask）。"""
+    pred_seg = segmentation_output["segmentation"]
+    target_hw = tuple(pred_seg.shape[-2:])
+    file_name = image_info["file_name"]
+    semseg_sufix = getattr(metadata, "semseg_sufix", ".png")
+    file_name_semseg = os.path.splitext(file_name)[0] + semseg_sufix
+    gt_path = os.path.join(osp.realpath(metadata.semseg_map_folder), file_name_semseg)
+    gt = np.array(Image.open(gt_path), dtype=np.int64)
+    gt = torch.from_numpy(gt)
+    gt = resize_mask_gt(gt.unsqueeze(0), target_hw, scaled_size).squeeze(0)
+    ignore = getattr(metadata, "ignore_label", 255)
+    gt = torch.where(gt == ignore, torch.tensor(255, dtype=gt.dtype), gt)
+    return {"segmentation": gt}
+
+
+def _thing_contiguous_ids(metadata) -> Optional[set]:
+    if metadata is None or not hasattr(metadata, "thing_dataset_id_to_contiguous_id"):
+        return None
+    return set(metadata.thing_dataset_id_to_contiguous_id.values())
+
+
+def filter_instances_to_things(instances, metadata):
+    """Detection 可视化/指标只保留 thing 类预测。"""
+    thing_ids = _thing_contiguous_ids(metadata)
+    if thing_ids is None or instances is None or len(instances) == 0:
+        return instances
+    keep = [i for i, c in enumerate(instances.pred_classes.tolist()) if int(c) in thing_ids]
+    if len(keep) == len(instances):
+        return instances
+    if len(keep) == 0:
+        return instances[torch.tensor([], dtype=torch.long)]
+    return instances[torch.tensor(keep, dtype=torch.long)]
+
+
+def prepare_gt_data_detection(image_info, segmentation_output, metadata=None):
+    """Detection GT：从 COCO bbox 标注构造 Instances（支持水平框/旋转框）。"""
+    anns = image_info.get("gt_annotations")
+    if not anns:
+        return None
+
+    thing_ids = _thing_contiguous_ids(metadata)
+    if thing_ids is not None:
+        anns = [ann for ann in anns if int(ann.get("category_id", -1)) in thing_ids]
+    if not anns:
+        return None
+
+    target_hw = None
+    instances_out = segmentation_output.get("instances")
+    if instances_out is not None:
+        target_hw = tuple(instances_out.image_size)
+    if target_hw is None:
+        height = image_info.get("height")
+        width = image_info.get("width")
+        if height is not None and width is not None:
+            target_hw = (int(height), int(width))
+    if target_hw is None:
+        return None
+
+    box_tensors = []
+    classes = []
+    rotated = False
+    for ann in anns:
+        bbox = ann.get("bbox")
+        if bbox is None:
+            continue
+        bbox_mode = ann.get("bbox_mode", BoxMode.XYWH_ABS)
+        bbox = list(bbox)
+        if len(bbox) == 5:
+            rotated = True
+            angle = bbox[4]
+            if abs(angle) <= math.pi + 1e-3:
+                angle = math.degrees(angle)
+            box_tensors.append([bbox[0], bbox[1], bbox[2], bbox[3], angle])
+        elif len(bbox) == 4:
+            xyxy = BoxMode.convert(bbox, bbox_mode, BoxMode.XYXY_ABS)
+            box_tensors.append(xyxy)
+        else:
+            continue
+        classes.append(int(ann["category_id"]))
+
+    if not box_tensors:
+        return None
+
+    image_size = (int(target_hw[0]), int(target_hw[1]))
+    instances = Instances(image_size)
+    if rotated:
+        instances.pred_boxes = RotatedBoxes(torch.tensor(box_tensors, dtype=torch.float32))
+    else:
+        instances.pred_boxes = Boxes(torch.tensor(box_tensors, dtype=torch.float32))
+    instances.pred_classes = torch.tensor(classes, dtype=torch.long)
+    instances.scores = torch.ones(len(classes), dtype=torch.float32)
+    return {"instances": instances}
+
+
+def prepare_gt_data_instance(mask_gt, class_gt, segmentation_output, scaled_size):
+    """Instance seg GT：由 dataloader 的 mask_labels / class_labels 构造 Instances，供 draw_ins_seg 使用。"""
+    if mask_gt is None or class_gt is None or class_gt.numel() == 0:
+        return None
+
+    target_hw = None
+    instances_out = segmentation_output.get("instances")
+    if instances_out is not None:
+        target_hw = tuple(instances_out.image_size)
+
+    if target_hw is None:
+        pred_seg = segmentation_output.get("segmentation")
+        if isinstance(pred_seg, torch.Tensor):
+            target_hw = tuple(int(x) for x in pred_seg.shape[-2:])
+        elif isinstance(pred_seg, (list, tuple)) and len(pred_seg) > 0:
+            first = pred_seg[0]
+            if isinstance(first, torch.Tensor):
+                target_hw = tuple(int(x) for x in first.shape[-2:])
+
+    if target_hw is None and isinstance(mask_gt, torch.Tensor):
+        if mask_gt.ndim == 3:
+            target_hw = tuple(int(x) for x in mask_gt.shape[-2:])
+        elif mask_gt.ndim == 2:
+            target_hw = tuple(int(x) for x in mask_gt.shape)
+
+    if target_hw is None:
+        return None
+
+    masks = resize_mask_gt(mask_gt, target_hw, scaled_size)
+    if masks.ndim == 2:
+        masks = masks.unsqueeze(0)
+
+    image_size = (int(target_hw[0]), int(target_hw[1]))
+    instances = Instances(image_size)
+    instances.pred_masks = masks > 0
+    instances.pred_classes = class_gt.to(device=masks.device, dtype=torch.long)
+    instances.scores = torch.ones(class_gt.shape[0], device=masks.device, dtype=torch.float32)
+    instances.pred_boxes = BitMasks(instances.pred_masks).get_bounding_boxes()
+    return {"instances": instances}
+
+
 def prepare_gt_data(mask_gt, class_gt, segmentation_output, metadata, data_name, scaled_size, image_info=None):
-    if "genseg" in data_name and "pan" in data_name:
+    gt = None
+    if "detection" in data_name:
+        gt = prepare_gt_data_detection(image_info or {}, segmentation_output, metadata)
+    elif "instance" in data_name:
+        gt = prepare_gt_data_instance(mask_gt, class_gt, segmentation_output, scaled_size)
+    elif "genseg" in data_name and "pan" in data_name:
         gt = prepare_gt_data_pan(mask_gt, class_gt, segmentation_output, metadata, scaled_size, image_info=image_info)
     elif "ovseg" in data_name and "pan" in data_name:
         gt = prepare_gt_data_pan(mask_gt, class_gt, segmentation_output, metadata, scaled_size, image_info=image_info)
+    elif "ovseg" in data_name and "semantic" in data_name:
+        gt = prepare_gt_data_semantic(segmentation_output, metadata, scaled_size, image_info)
     elif "refseg" in data_name or "reaseg" in data_name:
-        gt = prepare_gt_data_refseg(mask_gt,class_gt,segmentation_output, scaled_size)
-    
+        gt = prepare_gt_data_refseg(mask_gt, class_gt, segmentation_output, scaled_size)
+
     return gt
 
 
@@ -430,6 +582,8 @@ def evaluate_dataset(
                 os.makedirs(vis_output_dir, exist_ok=True)
                 try:
                     seg_out_vis = dict(segmentation_output)
+                    if "detection" in data_name and seg_out_vis.get("instances") is not None:
+                        seg_out_vis["instances"] = filter_instances_to_things(seg_out_vis["instances"], metadata)
                     if "pan" in data_name and seg_out_vis.get("segments_info") is not None:
                         seg_out_vis["segments_info"] = _panoptic_pred_segments_info_for_vis(
                             seg_out_vis["segments_info"], metadata
@@ -450,9 +604,18 @@ def evaluate_dataset(
                     per_sample_labels = sampled_labels_batch[i]
                 gt_image_info = {**image_info, "sampled_labels": per_sample_labels} if per_sample_labels is not None else image_info
 
-                gt = prepare_gt_data(
-                    mask_gt, class_gt, segmentation_output, metadata, data_name, scaled_size, image_info=gt_image_info
-                )
+                try:
+                    gt = prepare_gt_data(
+                        mask_gt, class_gt, segmentation_output, metadata, data_name, scaled_size, image_info=gt_image_info
+                    )
+                except Exception as e:
+                    print_log(
+                        f"Error preparing ground truth for {file_name}: {e}\n{traceback.format_exc()}",
+                        logger="current",
+                    )
+                    continue
+                if gt is None:
+                    continue
                 try:
                     visualizer.draw_predictions(
                         image,
@@ -463,7 +626,6 @@ def evaluate_dataset(
                     )
                 except Exception as e:
                     print_log(f"Error visualizing ground truth {file_name}: {e}\n{traceback.format_exc()}", logger="current")
-                    continue
 
         val_inputs = copy.deepcopy(data["data_samples"].metainfo["image_infos"])   
         if 'imgconv' in data_name:

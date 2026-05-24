@@ -280,17 +280,19 @@ def derive_coco_results(coco_eval, iou_type, class_names=None, show_categories=F
         print_log("No predictions from the model!", logger="current")
         return {metric: float("nan") for metric in metrics}
 
-    # the standard metrics
+    # the standard metrics (AP = COCO mAP@[0.5:0.95])
     results = {
         metric: float(coco_eval.stats[idx] * 100 if coco_eval.stats[idx] >= 0 else "nan")
         for idx, metric in enumerate(metrics)
     }
-    table = create_small_table(results)
+    summary_metrics = {"mAP": results["AP"], "AP50": results["AP50"], "AP75": results["AP75"]}
+    summary_table = create_small_table(summary_metrics)
     if not np.isfinite(sum(results.values())):
         print_log("Some metrics cannot be computed and is shown as NaN.", logger="current")
 
     if class_names is None or len(class_names) <= 1:
-        return results
+        return summary_table
+
     # Compute per-category AP
     # from https://github.com/facebookresearch/Detectron/blob/a6a835f5b8208c45d0dce217ce9bbda915f44df7/detectron/datasets/json_dataset_evaluator.py#L222-L252 # noqa
     precisions = coco_eval.eval["precision"]
@@ -298,30 +300,39 @@ def derive_coco_results(coco_eval, iou_type, class_names=None, show_categories=F
     assert len(class_names) == precisions.shape[2]
 
     if show_categories:
+        iou50_idx = int(np.where(np.isclose(coco_eval.params.iouThrs, 0.5))[0][0])
+        iou75_idx = int(np.where(np.isclose(coco_eval.params.iouThrs, 0.75))[0][0])
         results_per_category = []
+
+        def _mean_ap(precision_slice):
+            p = precision_slice[precision_slice > -1]
+            return float(np.mean(p) * 100) if p.size else float("nan")
+
         for idx, name in enumerate(class_names):
-            # area range index 0: all area ranges
-            # max dets index -1: typically 100 per image
-            precision = precisions[:, :, idx, 0, -1]
-            precision = precision[precision > -1]
-            ap = np.mean(precision) if precision.size else float("nan")
-            results_per_category.append(("{}".format(name), float(ap * 100)))
+            # area range index 0: all area ranges; max dets index -1: typically 100 per image
+            results_per_category.append(
+                (
+                    name,
+                    _mean_ap(precisions[:, :, idx, 0, -1]),
+                    _mean_ap(precisions[iou50_idx, :, idx, 0, -1]),
+                    _mean_ap(precisions[iou75_idx, :, idx, 0, -1]),
+                )
+            )
 
-        # tabulate it
-        N_COLS = min(6, len(results_per_category) * 2)
-        results_flatten = list(itertools.chain(*results_per_category))
-        results_2d = itertools.zip_longest(*[results_flatten[i::N_COLS] for i in range(N_COLS)])
-        table = tabulate(
-            results_2d,
+        category_rows = [
+            [name, f"{ap:.2f}", f"{ap50:.2f}", f"{ap75:.2f}"]
+            for name, ap, ap50, ap75 in results_per_category
+        ]
+        category_table = tabulate(
+            category_rows,
+            headers=["category", "AP", "AP50", "AP75"],
             tablefmt="outline",
-            floatfmt=".3f",
-            headers=["category", "AP"] * (N_COLS // 2),
-            numalign="left",
+            stralign="center",
+            numalign="center",
         )
-        table += "\n" + table
+        return f"{summary_table}\n{category_table}"
 
-        # results.update({"AP-" + name: ap for name, ap in results_per_category})
-    return table
+    return summary_table
 
 
 # Copied from detectron2

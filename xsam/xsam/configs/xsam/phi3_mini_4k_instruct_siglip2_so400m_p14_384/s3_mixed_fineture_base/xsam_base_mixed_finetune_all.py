@@ -239,6 +239,15 @@ ovseg_data_root = data_dir + "ov_seg_data/"
 refseg_data_root = data_dir + "ref_seg_data/"
 #reasonseg_data_root = data_dir + "reasonseg/"
 pano_data_root = data_dir + "pano/"
+# Potsdam OVRSISS (open-vocabulary panoptic / semantic / instance)
+potsdam_root = "/mnt_llm_A100_V1/pxy/data/OVRSISS_test/Potsdam/"
+potsdam_pano_root = potsdam_root + "ann_dir/val_gt_remapped/gt_remap_panoptic_coco/"
+potsdam_panoptic_json = potsdam_pano_root + "annotations/panoptic_annotations.json"
+potsdam_instance_json = potsdam_pano_root + "annotations/instance_annotations.json"
+potsdam_image_folder = potsdam_root + "img_dir/val/"
+potsdam_panseg_folder = potsdam_pano_root + "panoptic_rgb_ids/"
+potsdam_semseg_folder = potsdam_root + "ann_dir/val_gt_remapped/remap_cocopano_gt_id/"
+potsdam_semantic_ignore_label = 5
 imgconv_data_root = data_dir + "img_conv_data/"
 # 绝对路径基准，避免相对路径报错
 
@@ -816,6 +825,141 @@ val_datasets = [
         max_length=max_length,
         pad_image_to_square=True,
         #max_eval_samples=50,
+    ),
+    # 2b. Potsdam OVSeg — panoptic (PQ / SQ / RQ)
+    dict(
+        type=OVSegDataset,
+        data_path=potsdam_panoptic_json,
+        image_folder=potsdam_image_folder,
+        panseg_map_folder=potsdam_panseg_folder,
+        data_mode="eval",
+        tokenizer=tokenizer,
+        task_name="ovseg",
+        data_name="potsdam_panoptic_ovseg_val",
+        output_ids_with_output=output_ids_with_output,
+        cond_type=cond_type,
+        special_tokens=special_tokens,
+        image_processor=image_processor,
+        extra_image_processor=extra_image_processor,
+        dataset_map_fn=dict(
+            type=dataset_map_fn_factory,
+            fn=ov_seg_map_fn,
+            cond_type=cond_type,
+        ),
+        postprocess_fn=dict(
+            type=process_map_fn_factory,
+            fn=ov_seg_postprocess_fn,
+            task_name="panoptic_ovseg",
+            threshold=0.0,
+        ),
+        template_map_fn=dict(
+            type=template_map_fn_factory,
+            template=prompt_template,
+            output_suffix=output_ids_with_output,
+        ),
+        max_length=max_length,
+        pad_image_to_square=True,
+    ),
+    # 2c. Potsdam OVSeg — semantic (mIoU, 5 classes; id=5 background ignored)
+    dict(
+        type=OVSegDataset,
+        data_path=potsdam_panoptic_json,
+        image_folder=potsdam_image_folder,
+        semseg_map_folder=potsdam_semseg_folder,
+        ignore_label=potsdam_semantic_ignore_label,
+        data_mode="eval",
+        tokenizer=tokenizer,
+        task_name="ovseg",
+        data_name="potsdam_semantic_ovseg_val",
+        output_ids_with_output=output_ids_with_output,
+        cond_type=cond_type,
+        special_tokens=special_tokens,
+        image_processor=image_processor,
+        extra_image_processor=extra_image_processor,
+        dataset_map_fn=dict(
+            type=dataset_map_fn_factory,
+            fn=ov_seg_map_fn,
+            cond_type=cond_type,
+        ),
+        postprocess_fn=dict(
+            type=process_map_fn_factory,
+            fn=ov_seg_postprocess_fn,
+            task_name="semantic_ovseg",
+        ),
+        template_map_fn=dict(
+            type=template_map_fn_factory,
+            template=prompt_template,
+            output_suffix=output_ids_with_output,
+        ),
+        max_length=max_length,
+        pad_image_to_square=True,
+    ),
+    # 2d. Potsdam OVSeg — instance mask (AP / AP50, thing: building, car)
+    dict(
+        type=OVSegDataset,
+        data_path=potsdam_instance_json,
+        image_folder=potsdam_image_folder,
+        data_mode="eval",
+        tokenizer=tokenizer,
+        task_name="ovseg",
+        data_name="potsdam_instance_ovseg_val",
+        output_ids_with_output=output_ids_with_output,
+        cond_type=cond_type,
+        special_tokens=special_tokens,
+        image_processor=image_processor,
+        extra_image_processor=extra_image_processor,
+        dataset_map_fn=dict(
+            type=dataset_map_fn_factory,
+            fn=ov_seg_map_fn,
+            cond_type=cond_type,
+        ),
+        postprocess_fn=dict(
+            type=process_map_fn_factory,
+            fn=ov_seg_postprocess_fn,
+            task_name="instance_ovseg",
+            threshold=0.0,
+        ),
+        template_map_fn=dict(
+            type=template_map_fn_factory,
+            template=prompt_template,
+            output_suffix=output_ids_with_output,
+        ),
+        max_length=max_length,
+        pad_image_to_square=True,
+    ),
+    # 2e. Potsdam OVSeg — object detection (mAP/AP50/AP75; hbox or rbox auto-detected from GT)
+    dict(
+        type=OVSegDataset,
+        data_path=potsdam_instance_json,  # 或纯检测 COCO JSON（可仅含 bbox，可含 5 参数旋转框）
+        image_folder=potsdam_image_folder,
+        data_mode="eval",
+        tokenizer=tokenizer,
+        task_name="ovseg",
+        data_name="potsdam_detection_ovseg_val",
+        output_ids_with_output=output_ids_with_output,
+        cond_type=cond_type,
+        special_tokens=special_tokens,
+        image_processor=image_processor,
+        extra_image_processor=extra_image_processor,
+        dataset_map_fn=dict(
+            type=dataset_map_fn_factory,
+            fn=ov_seg_map_fn,
+            cond_type=cond_type,
+        ),
+        postprocess_fn=dict(
+            type=process_map_fn_factory,
+            fn=ov_seg_postprocess_fn,
+            task_name="detection_ovseg",
+            threshold=0.1,
+            nms_threshold=0.5,
+        ),
+        template_map_fn=dict(
+            type=template_map_fn_factory,
+            template=prompt_template,
+            output_suffix=output_ids_with_output,
+        ),
+        max_length=max_length,
+        pad_image_to_square=True,
     ),
     # 3. Referring Segmentation (refseg) - RemoteSAM validation
     dict(
@@ -1692,6 +1836,31 @@ val_evaluators = [
         data_name="panoptic_ovseg_pano_val",
         distributed=True,
     ),
+    # 2b–2d. Potsdam OVSeg (PQ/SQ/RQ, mIoU, mask AP)
+    dict(
+        type=OVSegEvaluator,
+        data_name="potsdam_panoptic_ovseg_val",
+        distributed=True,
+        show_categories=True,
+    ),
+    dict(
+        type=OVSegEvaluator,
+        data_name="potsdam_semantic_ovseg_val",
+        distributed=True,
+        show_categories=True,
+    ),
+    dict(
+        type=OVSegEvaluator,
+        data_name="potsdam_instance_ovseg_val",
+        distributed=True,
+        show_categories=True,
+    ),
+    dict(
+        type=OVSegEvaluator,
+        data_name="potsdam_detection_ovseg_val",
+        distributed=True,
+        show_categories=True,
+    ),
     # 3. Referring Segmentation (refseg) - RemoteSAM validation
     dict(
         type=RefSegEvaluator,
@@ -1893,10 +2062,19 @@ val_evaluators = [
     ),
 ]
 
-# 临时只跑 refseg_rrsisd_test：其余评测集在这里统一过滤掉。
-_eval_target_data_name = "reaseg_earthreason_test"
-val_datasets = [dataset for dataset in val_datasets if dataset.get("data_name") == _eval_target_data_name]
-val_evaluators = [evaluator for evaluator in val_evaluators if evaluator.get("data_name") == _eval_target_data_name]
+# 评测集过滤：只跑列表中的 data_name；设为 None 则跑全部 val 集。
+# xsam_eval_021_batch.sh 默认跑 Potsdam OVSeg（PQ/SQ/RQ + mIoU + mask AP）
+_eval_target_data_names = [
+  #  "potsdam_panoptic_ovseg_val",
+  #  "potsdam_semantic_ovseg_val",
+   # "potsdam_instance_ovseg_val",
+    "potsdam_detection_ovseg_val"
+]
+# _eval_target_data_names = ["reaseg_earthreason_test"]
+# _eval_target_data_names = ["panoptic_ovseg_pano_val"]
+if _eval_target_data_names is not None:
+    val_datasets = [d for d in val_datasets if d.get("data_name") in _eval_target_data_names]
+    val_evaluators = [e for e in val_evaluators if e.get("data_name") in _eval_target_data_names]
 
 vis_datasets = deepcopy(val_datasets)
 for dataset in vis_datasets:
