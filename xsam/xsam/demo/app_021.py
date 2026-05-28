@@ -177,7 +177,7 @@ custom_css = """
 
 TASK_DESCRIPTION = {
     "imgconv": "根据图像回答自然语言问题。",
-    "genseg": "全景分割（genseg）：默认使用配置中 pano 数据集的类别定义；可留空提示词表示全类别，或按 ins:/sem: 指定子集。",
+    "genseg": "全景分割（genseg）：与 xsam_predict_genseg_pano_021.sh 相同通路，固定使用 assets/annotations_val.json 全量 pano 类别（tensor）；界面提示词仅作展示，可留空。",
     "ovseg": "开集全景（ovseg）：由用户在提示中自行定义类别；推荐 thing: 实例类; stuff: 背景类，逗号分隔时全部按 stuff 处理。",
     "refseg": "指代表达分割：用自然语言描述目标物体。",
     "reaseg": "推理分割：根据推理类问题定位并分割相关区域。",
@@ -310,9 +310,10 @@ class GradioApp:
             # Run prediction using custom logic
             start_time = time.time()
 
-            # Run model inference
+            # genseg/ovseg 与 eval 一致用 threshold=0；过高会滤掉全部 mask，可视化只剩原图
+            seg_threshold = 0.0 if task_name in ("genseg", "ovseg") else score_thr
             llm_input, llm_output, seg_output = self.demo.run_on_image(
-                pil_image, prompt, task_name, vprompt_masks=vprompt_masks, threshold=score_thr
+                pil_image, prompt, task_name, vprompt_masks=vprompt_masks, threshold=seg_threshold
             )
 
             llm_success = llm_output is not None
@@ -404,10 +405,10 @@ class GradioApp:
                         score_thr = gr.Slider(
                             minimum=0,
                             maximum=1,
-                            value=0.5,
+                            value=0.0,
                             step=0.01,
                             interactive=True,
-                            label="分数阈值",
+                            label="分数阈值（refseg/reaseg 等；genseg/ovseg 固定为 0）",
                             elem_classes="score-threshold",
                         )
 

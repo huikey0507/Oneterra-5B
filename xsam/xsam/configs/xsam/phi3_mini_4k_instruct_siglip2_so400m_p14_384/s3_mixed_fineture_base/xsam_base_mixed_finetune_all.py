@@ -242,6 +242,9 @@ pano_data_root = data_dir + "pano/"
 # Potsdam OVRSISS (open-vocabulary panoptic / semantic / instance)
 potsdam_root = "/mnt_llm_A100_V1/pxy/data/OVRSISS_test/Potsdam/"
 potsdam_pano_root = potsdam_root + "ann_dir/val_gt_remapped/gt_remap_panoptic_coco/"
+vaihingen_root = "/mnt_llm_A100_V1/pxy/data/OVRSISS_test/vaihingen/"
+vaihingen_pano_root = vaihingen_root + "ann_dir/val_gt_remapped/gt_remap_panoptic_coco/"
+
 imgconv_data_root = data_dir + "img_conv_data/"
 # 绝对路径基准，避免相对路径报错
 
@@ -955,6 +958,144 @@ val_datasets = [
         max_length=max_length,
         pad_image_to_square=True,
     ),
+   # 2b. Vaihingen OVSeg — panoptic (PQ / SQ / RQ)
+    dict(
+        type=OVSegDataset,
+        data_path=vaihingen_pano_root + "annotations/panoptic_annotations.json",
+        image_folder=vaihingen_root + "img_dir/val/",
+        panseg_map_folder=vaihingen_pano_root + "panoptic_rgb_ids/",
+        data_mode="eval",
+        tokenizer=tokenizer,
+        task_name="ovseg",
+        data_name="vaihingen_panoptic_ovseg_val",
+        output_ids_with_output=output_ids_with_output,
+        cond_type=cond_type,
+        special_tokens=special_tokens,
+        image_processor=image_processor,
+        extra_image_processor=extra_image_processor,
+        dataset_map_fn=dict(
+            type=dataset_map_fn_factory,
+            fn=ov_seg_map_fn,
+            cond_type=cond_type,
+        ),
+        postprocess_fn=dict(
+            type=process_map_fn_factory,
+            fn=ov_seg_postprocess_fn,
+            task_name="panoptic_ovseg",
+            threshold=0.0,
+        ),
+        template_map_fn=dict(
+            type=template_map_fn_factory,
+            template=prompt_template,
+            output_suffix=output_ids_with_output,
+        ),
+        max_length=max_length,
+        pad_image_to_square=True,
+    ),
+    # 2c. Potsdam OVSeg — semantic (mIoU, 5 classes; id=5 background ignored)
+    dict(
+        type=OVSegDataset,
+        data_path=vaihingen_pano_root + "annotations/panoptic_annotations.json",
+        image_folder=vaihingen_root + "img_dir/val/",
+        semseg_map_folder=vaihingen_root + "ann_dir/val_gt_remapped/remap_cocopano_gt_id/",
+        ignore_label=5,
+        data_mode="eval",
+        tokenizer=tokenizer,
+        task_name="ovseg",
+        data_name="vaihingen_semantic_ovseg_val",
+        output_ids_with_output=output_ids_with_output,
+        cond_type=cond_type,
+        special_tokens=special_tokens,
+        image_processor=image_processor,
+        extra_image_processor=extra_image_processor,
+        dataset_map_fn=dict(
+            type=dataset_map_fn_factory,
+            fn=ov_seg_map_fn,
+            cond_type=cond_type,
+        ),
+        postprocess_fn=dict(
+            type=process_map_fn_factory,
+            fn=ov_seg_postprocess_fn,
+            task_name="semantic_ovseg",
+        ),
+        template_map_fn=dict(
+            type=template_map_fn_factory,
+            template=prompt_template,
+            output_suffix=output_ids_with_output,
+        ),
+        max_length=max_length,
+        pad_image_to_square=True,
+    ),
+    # 2d. Potsdam OVSeg — instance mask (AP / AP50, thing: building, car)
+    dict(
+        type=OVSegDataset,
+        data_path=vaihingen_pano_root + "annotations/instance_annotations.json",
+        image_folder=vaihingen_root + "img_dir/val/",
+        data_mode="eval",
+        tokenizer=tokenizer,
+        task_name="ovseg",
+        data_name="vaihingen_instance_ovseg_val",
+        output_ids_with_output=output_ids_with_output,
+        cond_type=cond_type,
+        special_tokens=special_tokens,
+        image_processor=image_processor,
+        extra_image_processor=extra_image_processor,
+        dataset_map_fn=dict(
+            type=dataset_map_fn_factory,
+            fn=ov_seg_map_fn,
+            cond_type=cond_type,
+        ),
+        postprocess_fn=dict(
+            type=process_map_fn_factory,
+            fn=ov_seg_postprocess_fn,
+            task_name="instance_ovseg",
+            threshold=0.0,
+        ),
+        template_map_fn=dict(
+            type=template_map_fn_factory,
+            template=prompt_template,
+            output_suffix=output_ids_with_output,
+        ),
+        max_length=max_length,
+        pad_image_to_square=True,
+    ),
+    # 2e. Potsdam OVSeg — object detection (mAP/AP50/AP75; hbox or rbox auto-detected from GT)
+    dict(
+        type=OVSegDataset,
+        data_path=vaihingen_pano_root + "annotations/instance_annotations.json",  # 或纯检测 COCO JSON（可仅含 bbox，可含 5 参数旋转框）
+        image_folder=vaihingen_root + "img_dir/val/",
+        data_mode="eval",
+        tokenizer=tokenizer,
+        task_name="ovseg",
+        data_name="vaihingen_detection_ovseg_val",
+        output_ids_with_output=output_ids_with_output,
+        cond_type=cond_type,
+        special_tokens=special_tokens,
+        image_processor=image_processor,
+        extra_image_processor=extra_image_processor,
+        dataset_map_fn=dict(
+            type=dataset_map_fn_factory,
+            fn=ov_seg_map_fn,
+            cond_type=cond_type,
+        ),
+        postprocess_fn=dict(
+            type=process_map_fn_factory,
+            fn=ov_seg_postprocess_fn,
+            task_name="detection_ovseg",
+            threshold=0.1,
+            nms_threshold=0.5,
+        ),
+        template_map_fn=dict(
+            type=template_map_fn_factory,
+            template=prompt_template,
+            output_suffix=output_ids_with_output,
+        ),
+        max_length=max_length,
+        pad_image_to_square=True,
+    ), 
+    
+    
+    
     # 3. Referring Segmentation (refseg) - RemoteSAM validation
     dict(
         type=RefSegDataset,
@@ -1855,6 +1996,31 @@ val_evaluators = [
         distributed=True,
         show_categories=True,
     ),
+    # 2b–2d. Potsdam OVSeg (PQ/SQ/RQ, mIoU, mask AP)
+    dict(
+        type=OVSegEvaluator,
+        data_name="vaihingen_panoptic_ovseg_val",
+        distributed=True,
+        show_categories=True,
+    ),
+    dict(
+        type=OVSegEvaluator,
+        data_name="vaihingen_semantic_ovseg_val",
+        distributed=True,
+        show_categories=True,
+    ),
+    dict(
+        type=OVSegEvaluator,
+        data_name="vaihingen_instance_ovseg_val",
+        distributed=True,
+        show_categories=True,
+    ),
+    dict(
+        type=OVSegEvaluator,
+        data_name="vaihingen_detection_ovseg_val",
+        distributed=True,
+        show_categories=True,
+    ),
     # 3. Referring Segmentation (refseg) - RemoteSAM validation
     dict(
         type=RefSegEvaluator,
@@ -2059,10 +2225,12 @@ val_evaluators = [
 # 评测集过滤：只跑列表中的 data_name；设为 None 则跑全部 val 集。
 # xsam_eval_021_batch.sh 默认跑 Potsdam OVSeg（PQ/SQ/RQ + mIoU + mask AP）
 _eval_target_data_names = [
-  #  "potsdam_panoptic_ovseg_val",
-  #  "potsdam_semantic_ovseg_val",
-   # "potsdam_instance_ovseg_val",
-    "potsdam_detection_ovseg_val"
+  #  "vaihingen_panoptic_ovseg_val",
+   # "vaihingen_semantic_ovseg_val",
+   # "vaihingen_instance_ovseg_val",
+    #"vaihingen_detection_ovseg_val",
+    "panoptic_genseg_pano_val"
+    
 ]
 # _eval_target_data_names = ["reaseg_earthreason_test"]
 # _eval_target_data_names = ["panoptic_ovseg_pano_val"]

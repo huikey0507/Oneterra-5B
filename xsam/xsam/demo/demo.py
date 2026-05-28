@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 from mmengine.config import Config, DictAction
 from mmengine.runner.utils import set_random_seed
+from mmengine.utils.misc import get_object_from_string
 from PIL import Image
 from xtuner.configs import cfgs_name_path
 from xtuner.dataset.utils import expand2square
@@ -36,6 +37,7 @@ from xsam.dataset.map_fns import (
     template_map_fn_factory,
     vgd_seg_map_fn,
 )
+from xsam.dataset.map_fns.template_map_fn_factory import template_map_fn
 from xsam.dataset.process_fns import (
     gcg_seg_postprocess_fn,
     generic_seg_postprocess_fn,
@@ -54,8 +56,17 @@ from xsam.utils.config import setup_model_config
 from xsam.utils.constants import DEFAULT_IMAGE_TOKEN, INDEX2TOKEN
 from xsam.utils.logging import print_log, set_default_logging_format
 from xsam.utils.palette import get_palette
+from xsam.demo.genseg_pano_utils import (
+    GENSEG_PANO_METADATA_NAME,
+    GENSEG_PANO_VIS_DATA_NAME,
+    build_metadata_from_categories,
+    convert_segments_info_to_dataset_id,
+    load_pano_categories,
+    resolve_pano_categories_json,
+)
 from xsam.utils.misc import data_dict_to_device
 from xsam.utils.utils import register_function
+from xsam.utils.visualize import Visualizer
 
 # Global setup
 set_default_logging_format()
@@ -292,6 +303,13 @@ class XSamDemo:
                     self._pano_coco_raw = None
                     self._pano_full_signature = None
 
+        try:
+            self._genseg_pano_json_resolved = resolve_pano_categories_json(self.cfg)
+            print_log(f"genseg pano 类别 JSON: {self._genseg_pano_json_resolved}", logger="current")
+        except FileNotFoundError as e:
+            self._genseg_pano_json_resolved = None
+            print_log(f"genseg pano JSON 未找到，将回退旧 demo 路径: {e}", logger="current")
+
     def _pano_panseg_folder_for_json(self, json_path: str) -> str:
         root = self.cfg.pano_data_root
         if "annotations_val" in json_path or json_path.endswith("val_annotations.json"):
@@ -312,9 +330,12 @@ class XSamDemo:
         return thing_classes, stuff_classes, cat_name_to_isthing
 
     def default_genseg_prompt(self) -> str:
-        """与评测 pano genseg 一致的 ins:/sem: 默认提示（来自 pano 或 SOTA 标注）。"""
-        thing_classes, stuff_classes, _ = self._load_sota_categories("genseg")
-        if not thing_classes or not stuff_classes:
+        """展示用 ins:/sem: 提示；实际 genseg 推理走 predict_genseg_pano 全量 pano 类别（与评测脚本一致）。"""
+        if self._genseg_pano_json_resolved and osp.isfile(self._genseg_pano_json_resolved):
+            _, thing_classes, stuff_classes, _ = load_pano_categories(self._genseg_pano_json_resolved)
+        else:
+            thing_classes, stuff_classes, _ = self._load_sota_categories("genseg")
+        if not thing_classes and not stuff_classes:
             return ""
         return "ins: " + ", ".join(thing_classes) + ";\nsem: " + ", ".join(stuff_classes)
 
@@ -454,20 +475,49 @@ class XSamDemo:
         }
         return postprocess_fns
 
-    def _get_input_ids(self, data_dict, task_name, with_image_token=True, next_needs_bos_token=False):
+    @staticmethod
+    def _uses_tensor_infer(task_name: str) -> bool:
+        """genseg/ovseg 与 eval、predict_genseg_pano 一致走 tensor 前向。"""
+        return task_name in ("genseg", "ovseg") or "genseg" in task_name
+
+    def _input_ids_with_output_for_task(self, task_name: str) -> bool:
+        if self._uses_tensor_infer(task_name):
+            return True
+        return self.output_ids_with_output
+
+    def _apply_template_map_fn(self, data_dict, task_name: str, input_ids_with_output: bool):
+        if self.template_map_fns.get(task_name) is None:
+            return data_dict
+        if input_ids_with_output == self.output_ids_with_output:
+            return self.template_map_fns[task_name](data_dict)
+        template = self.cfg.prompt_template
+        if isinstance(template, str):
+            template = get_object_from_string(template)
+        return template_map_fn(data_dict, template, output_suffix=input_ids_with_output)
+
+    def _get_input_ids(
+        self,
+        data_dict,
+        task_name,
+        with_image_token=True,
+        next_needs_bos_token=False,
+        input_ids_with_output=None,
+    ):
         if self.tokenizer is None:
             return data_dict
 
+        if input_ids_with_output is None:
+            input_ids_with_output = self._input_ids_with_output_for_task(task_name)
+
         if self.task_map_fns.get(task_name) is not None:
-            data_dict = self.task_map_fns[task_name](data_dict, self.output_ids_with_output)
-        if self.template_map_fns.get(task_name) is not None:
-            data_dict = self.template_map_fns[task_name](data_dict)
+            data_dict = self.task_map_fns[task_name](data_dict, input_ids_with_output)
+        data_dict = self._apply_template_map_fn(data_dict, task_name, input_ids_with_output)
         if self.tokenizer is not None:
             data_dict = encode_fn(
                 data_dict,
                 self.tokenizer,
                 self.max_length,
-                self.output_ids_with_output,
+                input_ids_with_output,
                 with_image_token,
                 next_needs_bos_token,
             )
@@ -764,7 +814,15 @@ class XSamDemo:
             data_dict["vprompt_masks"] = seg_output.get("vprompt_masks", None)
 
         data_dict.update(self._get_vgd_labels(data_dict))
-        data_dict.update(self._get_input_ids(data_dict, data_dict["task_name"], with_image_token=True))
+        task_name = data_dict["task_name"]
+        data_dict.update(
+            self._get_input_ids(
+                data_dict,
+                task_name,
+                with_image_token=True,
+                input_ids_with_output=self._input_ids_with_output_for_task(task_name),
+            )
+        )
         data_dict.update(self._get_cond_ids(data_dict))
         data_dict.update(self._get_seg_ids(data_dict))
 
@@ -892,32 +950,122 @@ class XSamDemo:
             # 验证metadata设置
             print_log(f"OVSeg metadata.dataset_classes: {metadata.dataset_classes if hasattr(metadata, 'dataset_classes') else 'NOT SET'}", logger="current")
         elif task_name == "genseg" and classes is not None:
-            # genseg: 从SOTA数据集加载的类别
             all_classes, thing_classes, stuff_classes = classes
+            dataset_classes = {i: c for i, c in enumerate(all_classes)}
             metadata.set(
                 dataset_id_to_contiguous_id={i: i for i, _ in enumerate(all_classes)},
                 thing_dataset_id_to_contiguous_id={i: i for i, c in enumerate(all_classes) if c in thing_classes},
                 stuff_dataset_id_to_contiguous_id={i: i for i, c in enumerate(all_classes) if c in stuff_classes},
                 thing_classes={i: c for i, c in enumerate(all_classes) if c in thing_classes},
                 stuff_classes={i: c for i, c in enumerate(all_classes) if c in stuff_classes},
+                dataset_classes=dataset_classes,
             )
         elif "genseg" in task_name and classes is not None:
             all_classes, thing_classes, stuff_classes = classes
+            dataset_classes = {i: c for i, c in enumerate(all_classes)}
             metadata.set(
                 dataset_id_to_contiguous_id={i: i for i, _ in enumerate(all_classes)},
                 thing_dataset_id_to_contiguous_id={i: i for i, c in enumerate(all_classes) if c in thing_classes},
                 stuff_dataset_id_to_contiguous_id={i: i for i, c in enumerate(all_classes) if c in stuff_classes},
                 thing_classes={i: c for i, c in enumerate(all_classes) if c in thing_classes},
                 stuff_classes={i: c for i, c in enumerate(all_classes) if c in stuff_classes},
+                dataset_classes=dataset_classes,
             )
 
         return metadata
 
+    def run_genseg_pano_predict(self, pil_image, threshold=0.0, pano_json=None):
+        """与 xsam/tools/predict_genseg_pano.py 单图通路完全一致（tensor + pano 全类别）。"""
+        pano_json = pano_json or self._genseg_pano_json_resolved
+        if not pano_json or not osp.isfile(pano_json):
+            pano_json = resolve_pano_categories_json(self.cfg, pano_json)
+
+        all_classes, thing_classes, stuff_classes, anno = load_pano_categories(pano_json)
+        metadata = build_metadata_from_categories(GENSEG_PANO_METADATA_NAME, anno["categories"])
+        classes = (all_classes, thing_classes, stuff_classes)
+
+        post_fn = self.postprocess_fns["genseg"]
+        if hasattr(post_fn, "keywords") and isinstance(post_fn.keywords, dict):
+            post_fn.keywords["threshold"] = threshold
+        self.model.postprocess_fn = post_fn
+
+        prev_output_flag = self.output_ids_with_output
+        self.output_ids_with_output = True
+        try:
+            data_dict = {"pil_image": pil_image, "vprompt_masks": None, "task_name": "genseg"}
+            data_dict.update(self._process_prompt("", "genseg", classes))
+            data_dict.update(self._process_image(pil_image))
+            data_dict.update(self._process_data_dict(data_dict))
+            seg_conversation = data_dict.get("conversation")
+
+            input_dict = xsam_collate_fn([data_dict])
+            input_dict = data_dict_to_device(input_dict, device=self.device, dtype=self.dtype)
+            model_inputs = input_dict["data_dict"]
+            data_samples = input_dict["data_samples"]
+            model_inputs.pop("labels", None)
+            model_inputs.pop("position_ids", None)
+            model_inputs.pop("attention_mask", None)
+        finally:
+            self.output_ids_with_output = prev_output_flag
+
+        llm_input = ""
+        generation_output = ""
+        if seg_conversation:
+            turn = seg_conversation[0] if isinstance(seg_conversation, list) else seg_conversation
+            llm_input = (turn.get("input") or "").replace(DEFAULT_IMAGE_TOKEN, "<image>").strip()
+            generation_output = (turn.get("output") or "").strip()
+
+        self.model.eval()
+        with torch.no_grad():
+            _, seg_outputs = self.model(
+                model_inputs,
+                data_samples,
+                mode="tensor",
+                metadata=metadata,
+                generation_config=self.generation_config,
+                stopping_criteria=self.stop_criteria,
+                do_postprocess=True,
+                do_loss=False,
+            )
+
+        if seg_outputs is None or len(seg_outputs) == 0:
+            print_log("genseg pano: empty seg_outputs from model", logger="current")
+            return llm_input, generation_output, None
+
+        seg_out = seg_outputs[0]
+        segments_info_ds = convert_segments_info_to_dataset_id(seg_out.get("segments_info"), metadata)
+        print_log(
+            f"genseg pano: {len(segments_info_ds)} segments after postprocess (threshold={threshold})",
+            logger="current",
+        )
+        if not segments_info_ds:
+            return llm_input, generation_output, None
+
+        image = np.array(pil_image.convert("RGB"))
+        vis_seg_out = dict(seg_out)
+        vis_seg_out["segments_info"] = segments_info_ds
+        visualizer = Visualizer(metadata=metadata)
+        visualized_image = visualizer.draw_predictions(
+            image,
+            data_name=GENSEG_PANO_VIS_DATA_NAME,
+            **vis_seg_out,
+        )
+        result_image = visualized_image.get_image()
+        if result_image is None:
+            return llm_input, generation_output, None
+        return llm_input, generation_output, result_image
+
     def run_on_image(self, image, prompt, task_name, vprompt_masks=None, **kwargs):
         # 在每次推理前重置状态，确保从干净状态开始
         self._current_classes = None
-        
-        mode = "tensor" if self.output_ids_with_output else "predict"
+
+        if task_name == "genseg":
+            pano_json = kwargs.pop("pano_categories_json", None)
+            threshold = kwargs.pop("threshold", 0.0)
+            return self.run_genseg_pano_predict(image, threshold=threshold, pano_json=pano_json)
+
+        uses_tensor = self._uses_tensor_infer(task_name)
+        mode = "tensor" if uses_tensor or self.output_ids_with_output else "predict"
         data_dict = {"pil_image": image, "vprompt_masks": vprompt_masks, "task_name": task_name}
 
         classes, task_name_postprocess = self._get_classes_from_prompt(prompt, task_name)
@@ -932,8 +1080,13 @@ class XSamDemo:
         data_dict.update(self._process_prompt(prompt, task_name, classes))
         data_dict.update(self._process_image(image))
         data_dict.update(self._process_data_dict(data_dict))
+        seg_conversation = data_dict.get("conversation")
         data_dict, data_samples = self._process_input_dict(data_dict)
         input_ids = data_dict["input_ids"]
+
+        if self._uses_tensor_infer(task_name):
+            # 与 eval / predict_genseg_pano 一致；demo 默认 score_thr=0.5 会滤掉全部 mask 导致只见原图
+            kwargs["threshold"] = 0.0
 
         # 与评测 DataLoader 中 sampled_labels 对齐：open_cls 下 pred 的 class 下标对应该顺序的 COCO id
         vis_sampled_labels = None
@@ -981,53 +1134,53 @@ class XSamDemo:
                 torch.cuda.synchronize()
                 return None, None, None
 
-        output_ids = llm_outputs.sequences
-        llm_input = self._decode_input_ids(input_ids[0].tolist())
-        
-        # 提取只包含新生成token的部分（移除输入部分）
-        input_length = input_ids[0].shape[0]
-        output_length = output_ids[0].shape[0]
-        
-        # 检查生成是否完整
-        generated_length = output_length - input_length
-        if generated_length < 10:  # 如果生成的内容太少，可能是提前停止了
-            print_log(
-                f"Warning: {task_name} generated only {generated_length} tokens "
-                f"(input: {input_length}, output: {output_length}). "
-                f"This may indicate early stopping. Full output: {self.tokenizer.decode(output_ids[0], skip_special_tokens=False)[:200]}",
-                logger="current"
-            )
-        
-        # 获取新生成的token IDs
-        if output_length > input_length:
-            generated_ids = output_ids[0][input_length:]
-            # 只解码新生成的部分
-            generation_output = self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
-        else:
-            # 如果输出长度等于或小于输入长度，说明没有生成新内容或立即停止了
-            # 尝试解码完整输出，然后手动移除输入部分
-            full_output = self.tokenizer.decode(output_ids[0], skip_special_tokens=True).strip()
-            # 移除输入部分（如果存在）
-            if llm_input and full_output.startswith(llm_input):
-                generation_output = full_output[len(llm_input):].strip()
-            else:
-                # 如果无法匹配，尝试更宽松的匹配（去除首尾空格后比较）
-                llm_input_stripped = llm_input.strip()
-                full_output_stripped = full_output.strip()
-                if llm_input_stripped and full_output_stripped.startswith(llm_input_stripped):
-                    generation_output = full_output_stripped[len(llm_input_stripped):].strip()
-                else:
-                    # 如果仍然无法匹配，返回完整输出（可能输入已经被处理过）
-                    generation_output = full_output_stripped
-            
-            # 调试信息：如果仍然没有生成内容，记录警告
-            if not generation_output or generation_output == "":
+        input_id_list = input_ids[0].tolist()
+        if uses_tensor and seg_conversation:
+            turn = seg_conversation[0] if isinstance(seg_conversation, list) else seg_conversation
+            llm_input = (turn.get("input") or "").replace(DEFAULT_IMAGE_TOKEN, "<image>").strip()
+            generation_output = (turn.get("output") or "").strip()
+            output_ids = input_ids
+        elif hasattr(llm_outputs, "sequences"):
+            llm_input = self._decode_input_ids(input_id_list)
+            output_ids = llm_outputs.sequences
+            input_length = input_ids[0].shape[0]
+            output_length = output_ids[0].shape[0]
+
+            generated_length = output_length - input_length
+            if generated_length < 10:
                 print_log(
-                    f"Warning: No new content generated. Input length: {input_length}, "
-                    f"Output length: {output_length}, Input: {repr(llm_input)}, "
-                    f"Full output: {repr(full_output)}",
-                    logger="current"
+                    f"Warning: {task_name} generated only {generated_length} tokens "
+                    f"(input: {input_length}, output: {output_length}). "
+                    f"This may indicate early stopping. Full output: {self.tokenizer.decode(output_ids[0], skip_special_tokens=False)[:200]}",
+                    logger="current",
                 )
+
+            if output_length > input_length:
+                generated_ids = output_ids[0][input_length:]
+                generation_output = self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+            else:
+                full_output = self.tokenizer.decode(output_ids[0], skip_special_tokens=True).strip()
+                if llm_input and full_output.startswith(llm_input):
+                    generation_output = full_output[len(llm_input) :].strip()
+                else:
+                    llm_input_stripped = llm_input.strip()
+                    full_output_stripped = full_output.strip()
+                    if llm_input_stripped and full_output_stripped.startswith(llm_input_stripped):
+                        generation_output = full_output_stripped[len(llm_input_stripped) :].strip()
+                    else:
+                        generation_output = full_output_stripped
+
+                if not generation_output:
+                    print_log(
+                        f"Warning: No new content generated. Input length: {input_length}, "
+                        f"Output length: {output_length}, Input: {repr(llm_input)}, "
+                        f"Full output: {repr(full_output)}",
+                        logger="current",
+                    )
+        else:
+            llm_input = self._decode_input_ids(input_id_list)
+            output_ids = input_ids
+            generation_output = ""
         
         # 清理特殊标记
         generation_output = generation_output.replace("<|end|>", "").replace("<p> ", "<p>").replace("</p> ", "</p>")
@@ -1049,8 +1202,12 @@ class XSamDemo:
         
         # 对于对话任务（imgconv），可能没有分割输出，跳过可视化（这是正常的）
         if seg_outputs is None or len(seg_outputs) == 0:
-            if task_name != "imgconv":  # imgconv任务不需要分割输出，不记录警告
-                print_log(f"Warning: {task_name} returned empty seg_outputs (None or len=0)", logger="current")
+            if task_name != "imgconv":
+                print_log(
+                    f"Warning: {task_name} returned empty seg_outputs (None or len=0). "
+                    f"genseg/ovseg 请确认分数阈值为 0（与评测一致）。",
+                    logger="current",
+                )
             # 清理LLM输出以释放内存
             if 'llm_outputs' in locals():
                 del llm_outputs
@@ -1067,7 +1224,7 @@ class XSamDemo:
             try:
                 # 使用与eval.py一致的data_name
                 if task_name == "genseg":
-                    vis_data_name = getattr(metadata, "data_name", "sota_panoptic_genseg_val")
+                    vis_data_name = getattr(metadata, "data_name", "panoptic_genseg_pano_val")
                 elif task_name == "ovseg":
                     vis_data_name = OVSEG_OPEN_METADATA_NAME
                 else:
@@ -1124,6 +1281,8 @@ class XSamDemo:
                     seg_output_for_vis["segments_info"] = _panoptic_pred_segments_info_for_vis(
                         seg_output_for_vis["segments_info"], metadata, sampled_labels=vis_sampled_labels
                     )
+                    n_seg = len(seg_output_for_vis["segments_info"])
+                    print_log(f"{task_name}: {n_seg} segments for visualization (threshold={kwargs.get('threshold', 'n/a')})", logger="current")
 
                 visualized_image = self.visualizer.draw_predictions(
                     image,
