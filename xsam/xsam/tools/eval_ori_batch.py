@@ -50,6 +50,10 @@ from xsam.dataset.utils.process import sem_seg_postprocess
 from xsam.structures import BitMasks, Boxes, BoxMode, Instances, RotatedBoxes
 from xsam.utils.visualize import Visualizer
 from xsam.utils.visualize_eval import EvalVisualizer
+from xsam.utils.xtuner_patch import patch_xtuner_llama_attn_for_single_gpu
+
+# Xtuner llama_attn_forward calls dist.get_rank(); single-GPU eval (launcher=none) has no process group.
+patch_xtuner_llama_attn_for_single_gpu()
 
 # Global setup
 set_default_logging_format()
@@ -346,23 +350,13 @@ def prepare_gt_data_semantic(segmentation_output, metadata, scaled_size, image_i
     return {"segmentation": gt}
 
 
+from xsam.utils.visualize import filter_instances_to_things
+
+
 def _thing_contiguous_ids(metadata) -> Optional[set]:
     if metadata is None or not hasattr(metadata, "thing_dataset_id_to_contiguous_id"):
         return None
     return set(metadata.thing_dataset_id_to_contiguous_id.values())
-
-
-def filter_instances_to_things(instances, metadata):
-    """Detection 可视化/指标只保留 thing 类预测。"""
-    thing_ids = _thing_contiguous_ids(metadata)
-    if thing_ids is None or instances is None or len(instances) == 0:
-        return instances
-    keep = [i for i, c in enumerate(instances.pred_classes.tolist()) if int(c) in thing_ids]
-    if len(keep) == len(instances):
-        return instances
-    if len(keep) == 0:
-        return instances[torch.tensor([], dtype=torch.long)]
-    return instances[torch.tensor(keep, dtype=torch.long)]
 
 
 def prepare_gt_data_detection(image_info, segmentation_output, metadata=None):

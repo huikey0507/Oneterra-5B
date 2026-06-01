@@ -20,12 +20,35 @@ from mmengine.dist import master_only
 from PIL import Image
 
 from ..dataset.utils.catalog import MetadataCatalog
-from ..structures import BitMasks, Boxes, BoxMode, Keypoints, PolygonMasks
+from ..structures import BitMasks, Boxes, BoxMode, Instances, Keypoints, PolygonMasks
 from .colormap import random_color
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["ColorMode", "VisImage", "Visualizer"]
+__all__ = ["ColorMode", "VisImage", "Visualizer", "filter_instances_to_things"]
+
+
+def _thing_contiguous_ids(metadata):
+    if metadata is None or not hasattr(metadata, "thing_dataset_id_to_contiguous_id"):
+        return None
+    return set(metadata.thing_dataset_id_to_contiguous_id.values())
+
+
+def _is_instance_val_data_name(data_name) -> bool:
+    return bool(data_name and "instance" in data_name and "detection" not in data_name)
+
+
+def filter_instances_to_things(instances, metadata):
+    """Instance val 可视化：不绘制/着色 stuff 类预测。"""
+    thing_ids = _thing_contiguous_ids(metadata)
+    if thing_ids is None or instances is None or len(instances) == 0:
+        return instances
+    keep = [i for i, c in enumerate(instances.pred_classes.tolist()) if int(c) in thing_ids]
+    if len(keep) == len(instances):
+        return instances
+    if len(keep) == 0:
+        return instances[torch.tensor([], dtype=torch.long)]
+    return instances[torch.tensor(keep, dtype=torch.long)]
 
 
 _SMALL_OBJECT_AREA_THRESH = 1000
@@ -699,7 +722,7 @@ class Visualizer:
         if "sem" in data_name:
             return self.draw_sem_seg(**kwargs)
         elif "detection" in data_name or "ins" in data_name:
-            return self.draw_ins_seg(**kwargs)
+            return self.draw_ins_seg(data_name=data_name, **kwargs)
         elif "pan" in data_name:
             return self.draw_pan_seg(**kwargs)
         else:
@@ -860,7 +883,7 @@ class Visualizer:
             )
         return self.output
 
-    def draw_ins_seg(self, instances, jittering: bool = True, **kwargs):
+    def draw_ins_seg(self, instances, jittering: bool = True, data_name=None, **kwargs):
         """
         Draw instance-level prediction results on an image.
 
@@ -874,6 +897,8 @@ class Visualizer:
         Returns:
             output (VisImage): image object with visualizations.
         """
+        if _is_instance_val_data_name(data_name):
+            instances = filter_instances_to_things(instances, self.metadata)
         instances = instances.to(self.cpu_device)
         boxes = instances.pred_boxes if instances.has("pred_boxes") else None
         scores = instances.scores if instances.has("scores") else None

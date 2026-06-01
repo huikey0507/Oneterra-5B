@@ -6,10 +6,11 @@
 
 from __future__ import annotations
 
+import matplotlib.colors as mplc
 import numpy as np
 import torch
 
-from .visualize import ColorMode, Visualizer, _OFF_WHITE
+from .visualize import ColorMode, Visualizer, _OFF_WHITE, _is_instance_val_data_name, filter_instances_to_things
 
 
 class EvalVisualizer(Visualizer):
@@ -66,6 +67,8 @@ class EvalVisualizer(Visualizer):
     def draw_ins_seg(self, instances, jittering: bool = True, data_name=None, **kwargs):
         from .visualize import GenericMask, _create_text_labels
 
+        if _is_instance_val_data_name(data_name):
+            instances = filter_instances_to_things(instances, self.metadata)
         instances = instances.to(self.cpu_device)
         boxes = instances.pred_boxes if instances.has("pred_boxes") else None
         scores = instances.scores if instances.has("scores") else None
@@ -80,19 +83,12 @@ class EvalVisualizer(Visualizer):
         else:
             masks = None
 
-        if self._instance_mode == ColorMode.SEGMENTATION:
-            color_palette = getattr(self.metadata, "thing_colors", None) or getattr(
-                self.metadata, "dataset_colors", None
+        if self._instance_mode == ColorMode.SEGMENTATION and self.metadata.get("thing_colors"):
+            colors = (
+                [self._jitter([x / 255 for x in self.metadata.thing_colors[c]]) for c in classes]
+                if jittering
+                else [tuple(mplc.to_rgb([x / 255 for x in self.metadata.thing_colors[c]])) for c in classes]
             )
-            colors = []
-            for c in classes:
-                pal_id = self._contiguous_id_for_palette(c)
-                try:
-                    fallback_seed = int(c)
-                except (TypeError, ValueError):
-                    fallback_seed = abs(hash(str(c))) % (2**32)
-                base = self._get_palette_color(color_palette, pal_id, fallback_seed=fallback_seed)
-                colors.append(self._jitter(base) if jittering else base)
             alpha = 0.8
         else:
             colors = None
