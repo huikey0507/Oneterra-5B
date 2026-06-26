@@ -40,12 +40,12 @@ from xsam.engine.hooks import DatasetInfoHook, DistLossReduceHook, EvaluateChatH
 from xsam.engine.runners.loops import TrainLoop
 from xsam.evaluation.evaluators import (
     GenSegEvaluator,
-    ImgConvCCEvaluator,
     ImgConvEvaluator,
-    ImgConvMLSCEvaluator,
     OVSegEvaluator,
     RefSegEvaluator,
     ReasonSegEvaluator,
+    ImgConvMLSCEvaluator,
+    ImgConvCCEvaluator
 )
 from peft import LoraConfig
 from xsam.model import XSamModel
@@ -61,16 +61,21 @@ import xsam.engine.runners.loops
 #                          PART 1  Settings                           #
 #######################################################################
 # Directories
-base_root = "/mnt_llm_A100_V1/"
+# base_root = "/mnt/si001883vtjl"
+base_root = "/mnt_llm_A100_V1"
 code_dir = getenv("CODE_DIR", "./xsam/")
 data_dir = getenv("DATA_DIR", "./datas/")
+
 init_dir = getenv("INIT_DIR", "./inits/")
+init_dir="/mnt_llm_A100_V1/shui/LAE/X-SAM/X-SAM/inits/"
 work_dir = getenv("WORK_DIR", "./checkpoints/")
 # 预训练权重目录（s1/s2 检查点），与 work_dir 分离：work_dir 仅用于本次训练输出
-checkpoint_dir = "./checkpoints/"
+checkpoint_dir = base_root + "/yangsen/workspace/OneTerra-train-stage3/checkpoints/"
 
 # Model
-llm_name_or_path = init_dir + "Phi-3-mini-4k-instruct"
+# 适配021
+llm_name_or_path = base_root + "/models/021/021-16b-instruct-release/"
+
 visual_encoder_name_or_path = init_dir + "siglip-so400m-patch14-384"
 seg_encoder_name_or_path = init_dir + "sam-vit-large"
 seg_decoder_name_or_path = init_dir + "mask2former-swin-large-coco-panoptic"
@@ -79,32 +84,38 @@ seg_decoder_name_or_path = init_dir + "mask2former-swin-large-coco-panoptic"
 s1_pretrained_pth = checkpoint_dir + "s1_seg_finetune/pytorch_model.bin"
 s2_pretrained_pth = (
     checkpoint_dir
-    + "xsam_s2_align_pretrain_skyscript_sar/iter_35874.pth"
+    + "s2_align_pretrain/xsam_s2_align_pretrain_skyscript_sar_021_nanhu/pytorch_model.bin"
 )  # noqa: E501
 
 # LoRA配置 - 大幅减少LLM显存占用（从45.6GB降至0.31GB）
+# 适配021
 llm_lora_config = dict(
     type=LoraConfig,
     r=16,  # LoRA rank，可以调整为8/16/32/64，越大效果越好但显存占用更多
     lora_alpha=32,  # LoRA alpha，通常是r的2倍
     target_modules=[
-        "self_attn.qkv_proj",  # Phi-3的attention层
-        "self_attn.o_proj",
-        "mlp.gate_up_proj",    # Phi-3的MLP层
-        "mlp.down_proj",
-    ],
+        "q_proj",
+        "gate_proj",
+        "v_proj",
+        "o_proj",
+        "k_proj",
+        "up_proj",
+        "down_proj",
+        "lm_head" # 这里把lm_head加入训练是因为新增token之后lm_head也会新增，这里先尝试lora训练
+    ],  # 适配021 llama3的MHA和MLP层，覆盖更多模块以提升性能
     lora_dropout=0.05,
     bias="none",
     task_type="CAUSAL_LM",
 )
 
 # Prompt
-prompt_template = PROMPT_TEMPLATE.phi3_chat
+# 适配021
+prompt_template = PROMPT_TEMPLATE.llama3_chat
 max_length = int(4096 - (384 / 14) ** 2 - 1024)
 
 # Scheduler & Optimizer
-batch_size = 2  # per_device（减小以降低多节点 OOM 导致 NCCL 断连）
-accumulative_counts = 4  # 梯度累积；每卡有效=8，64卡全局有效 batch=512（与原先一致）
+batch_size = 1  # per_device (进一步减小以节省内存)
+accumulative_counts = 4  # 梯度累积；每卡有效=8，64卡全局有效 batch=512
 dataloader_num_workers = 4 # 减少worker数量以避免共享内存不足（shm不足会导致bus error）
 max_epochs = 2
 optim_type = AdamW
@@ -130,18 +141,65 @@ evaluation_images = [
     code_dir + "xsam/configs/xsam/images/imgconv.png",
     code_dir + "xsam/configs/xsam/images/imgconv.png",
     code_dir + "xsam/configs/xsam/images/imgconv.png",
+    # SAR (train set examples)
+    base_root + "/yangsen/datasets/SARDet-100K/images/0026595.jpg",
+    base_root + "/yangsen/datasets/SARLANG-1M/SARimages_preprocessed/SARimages/SV_Portsmouth_50.7997_-1.0820.png",
+    base_root + "/yangsen/datasets/fusar_clip/sft/GF_VQA_ATR/train/images/daiyesi-_GF3_KRN_SL_009991_W99.8_N32.4_20180704_L1A_VV_L10003300481_Amp_GEC_Geocode-_6621-_3964-_8806-_7928-_1200-_0200.tiff",
+    base_root + "/yangsen/datasets/FSAR-CAP/all_images/GF3B_KSC_SL_000297_W71.0_N42.4_20211213_L1A_HH_L10000129337_09569_07588.png",
+    base_root + "/yangsen/datasets/sar_text/Image/optical_sar/531277.png",
+
+    # SAR (test set examples)
+    base_root + "/yangsen/datasets/FSAR-CAP/all_images/GF3_SAY_SL_029101_E139.7_N35.4_20220218_L1A_HH_L10000000001_04608_07490.png",
+    base_root + "/yangsen/datasets/SARDet-100K/images/0095791.jpg",
+    base_root + "/yangsen/datasets/SARLANG-1M/SARimages_preprocessed/SARimages/SV_Suzhou_31.3091_120.7550.png",
+    base_root + "/yangsen/datasets/fusar_clip/sft/QL_GF_VQA_count/test/images/daiyesi-_GF3_KAS_SL_810019_W99.9_N32.4_20180706_L1A_VV_L10003304487_Amp_GEC_Geocode-_8204-_2764-_10389-_6728-_1200-_0600.tiff"
 ]
 evaluation_inputs = [
     "Can you describe this image in detail? Please elaborate in your response.",
     "Can you generate segmentation masks for this image based on the specified categories: <p>water</p>, <p>tree</p>, <p>car</p>, <p>forest</p>, <p>airplane</p>, <p>grass</p>, <p>harbor</p>, <p>ship</p>, <p>building</p>? Please output the segmentation mask.",
     "Can you segment <p>the harbor on the left side of the image</p> in this image? Please output the corresponding segmentation mask.",
     "<p>Where does a ship go to sleep?</p> Please explain why and output the corresponding segmentation mask.",
+    # SAR (train set examples)
+    "What is the object visible in the image?The classes are: tank, car, aircraft, harbor, bridge, ship.\nAnswer in one word or a short phrase.",
+    "What is the large building?\nAnswer in one word or a short phrase.",
+    "Aircraft model for <rbox>12.30,73.44,16.02,14.06,0</rbox>?\nAnswer in one word or a short phrase.",
+    "Give a short, high-level summary of the image.",
+    "What is the most distinctive feature of the building in this SAR image?",
+
+    # SAR (test set examples)
+    "Describe the visible targets and their arrangement in the scene.",
+    "What is the object visible in the image?The classes are: tank, car, aircraft, harbor, bridge, ship.\nAnswer in one word or a short phrase.",
+    "What is the main feature visible in the center?\nAnswer in one word or a short phrase.",
+    "How many targets are in this image?\nAnswer in one word or a short phrase.",
 ]
+# SAR图文训练例参考回答 (training set examples)
+# 1) ship
+# 2) A warehouse
+# 3) C-130
+# 4) The radar image shows an industrial zone with oil tanks and buildings, with roads crossing the lower-right section.
+# 5) The most distinctive feature is the circular arrangement of flat roofs with solar panels surrounding a central open space. The pattern is clearly visible in the radar reflection.
+
+# SAR图文测试例参考回答 (test set examples)
+# 1) A large ship is visible in the bottomright part of the image, with a long, linear shape that runs across the water.
+# 2) aircraft
+# 3) Canal
+# 4) 6
+
 vprompt_masks = [
     (None,),  # imgconv
     (None,),  # genseg
     (None,),  # refseg
     (None,),  # reaseg
+    (None,),  # sar
+    (None,),  # sar
+    (None,),  # sar
+    (None,),  # sar
+    (None,),  # sar
+    (None,),  # sar
+    (None,),  # sar
+    (None,),  # sar
+    (None,),  # sar
+
 ]
 
 #######################################################################
@@ -237,14 +295,8 @@ model = dict(
 genseg_data_root = data_dir + "gen_seg_data/"
 ovseg_data_root = data_dir + "ov_seg_data/"
 refseg_data_root = data_dir + "ref_seg_data/"
-#reasonseg_data_root = data_dir + "reasonseg/"
+reasonseg_data_root = data_dir + "reasonseg/"
 pano_data_root = data_dir + "pano/"
-# Potsdam OVRSISS (open-vocabulary panoptic / semantic / instance)
-potsdam_root = "/mnt_llm_A100_V1/pxy/data/OVRSISS_test/Potsdam/"
-potsdam_pano_root = potsdam_root + "ann_dir/val_gt_remapped/gt_remap_panoptic_coco/"
-vaihingen_root = "/mnt_llm_A100_V1/pxy/data/OVRSISS_test/vaihingen/"
-vaihingen_pano_root = vaihingen_root + "ann_dir/val_gt_remapped/gt_remap_panoptic_coco/"
-
 imgconv_data_root = data_dir + "img_conv_data/"
 # 绝对路径基准，避免相对路径报错
 
@@ -256,7 +308,6 @@ fitrs_imgconv_data_path = fitrs_data_root + "train_data_of_each_individual_task/
 fitrs_imgconv_image_folder = fitrs_data_root + "imgv2_split_512_100_vaild"
 # 光学图像描述数据集路径
 optical_caption_data_root = oneterra_data_root + "imgconv/image_caption/"
-reasonseg_data_root = oneterra_data_root + "reasonseg/"
 
 # False for predict mode, True for tensor mode
 output_ids_with_output = True
@@ -299,7 +350,7 @@ train_extra_image_processor.update(
 # - 使用 repeats_scale=1.25 平衡数据量，使每个epoch约124K样本
 geochat_imgconv_dataset = dict(
     type=ImgConvDataset,
-    data_path=imgconv_data_root + "geochat/geochat_llava.json",
+    data_path=imgconv_data_root + "geochat/geochat_llava_val_tmp.json",
     tokenizer=tokenizer,
     cond_type=cond_type,
     special_tokens=special_tokens,
@@ -509,7 +560,7 @@ sar_total_imgconv_dataset = dict(
 
 
 # 2. Generic Segmentation (genseg) - 使用pano数据集的train模式
-# 注意：PanoSegDataset 应与 GenSeg 一致——用 annotations 里 categories 顺序作为 contiguous（与 pano val 测评一致）
+# 注意：使用PanoSegDataset自动处理类别ID映射（42个地物类别映射到0-41，背景类索引为42）
 pano_genseg_dataset = dict(
     type=PanoSegDataset,
     data_path=pano_data_root + "annotations_train.json",
@@ -557,6 +608,9 @@ pano_ovseg_dataset = dict(
     pad_image_to_square=False,
     repeats_scale=3,
 )
+
+
+
 
 # 4. Referring Segmentation (refseg) - RemoteSAM data
 remotesam_refseg_dataset = dict(
@@ -693,22 +747,22 @@ combined_train_dataset = dict(
         # ucm_captions_imgconv_dataset,
         # nwpu_captions_imgconv_dataset,
         geochat_imgconv_dataset,
-        fitrs_complexcompre_imgconv_dataset,
-        fitrs_imagecaption_imgconv_dataset,
-        fitrs_imageclassification_imgconv_dataset,
-        fitrs_multiturn_imgconv_dataset,
-        fitrs_regioncaption_imgconv_dataset,
-        fitrs_vqa_imgconv_dataset,
-        sar_total_imgconv_dataset,
-        # 分割任务
-        pano_genseg_dataset,
-        pano_ovseg_dataset,
-        # 指代分割任务
-        fast_refseg_dataset,
-        remotesam_refseg_dataset,
-        # 推理分割任务
-        earthreason_reaseg_dataset,
-        diy1_reaseg_dataset,
+        # fitrs_complexcompre_imgconv_dataset,
+        # fitrs_imagecaption_imgconv_dataset,
+        # fitrs_imageclassification_imgconv_dataset,
+        # fitrs_multiturn_imgconv_dataset,
+        # fitrs_regioncaption_imgconv_dataset,
+        # fitrs_vqa_imgconv_dataset,
+        # sar_total_imgconv_dataset,
+        # # 分割任务
+        # pano_genseg_dataset,
+        # pano_ovseg_dataset,
+        # # 指代分割任务
+        # fast_refseg_dataset,
+        # remotesam_refseg_dataset,
+        # # 推理分割任务
+        # earthreason_reaseg_dataset,
+        # diy1_reaseg_dataset,
     ],
 )
 
@@ -728,11 +782,14 @@ train_dataloader = dict(
     collate_fn=dict(type=xsam_collate_fn),
 )
 
+#######################################################################
+#                      PART 3  Dataset & Dataloader                   #
+#######################################################################
 # 数据路径配置
-# genseg_data_root = data_dir + "gen_seg_data/"
-# ovseg_data_root = data_dir + "ov_seg_data/"
-# refseg_data_root = data_dir + "ref_seg_data/"
-# reasonseg_data_root = "/mnt_llm_A100_V1/shui/oneterra_data/reasonseg/"
+genseg_data_root = data_dir + "gen_seg_data/"
+ovseg_data_root = data_dir + "ov_seg_data/"
+refseg_data_root = data_dir + "ref_seg_data/"
+reasonseg_data_root = "/mnt_llm_A100_V1/shui/oneterra_data/reasonseg/"
 # reasonseg_data_root = "/mnt_llm_A100_V1/yangsen/datasets/xsam/"
 imgconv_data_root = data_dir + "img_conv_data/"
 imgconv_cc_data_root = "/mnt_llm_A100_V1/shui/oneterra_data/imgconv/FIT-RS/"
@@ -749,9 +806,11 @@ SIRI_WHU_data_root = "/mnt_llm_A100_V1/yangsen/datasets/SIRI-WHU/"
 UC_Merced_data_root = "/mnt_llm_A100_V1/yangsen/datasets/UC_Merced/"
 AID_multilabel_data_root = "/mnt_llm_A100_V1/yangsen/datasets/AID_multilabel/"
 
-# False for predict mode, True for tensor mode
-output_ids_with_output = True
 
+potsdam_root = "/mnt_llm_A100_V1/pxy/data/OVRSISS_test/Potsdam/"
+potsdam_pano_root = potsdam_root + "ann_dir/val_gt_remapped/gt_remap_panoptic_coco/"
+vaihingen_root = "/mnt_llm_A100_V1/pxy/data/OVRSISS_test/vaihingen/"
+vaihingen_pano_root = vaihingen_root + "ann_dir/val_gt_remapped/gt_remap_panoptic_coco/"
 
 val_datasets = [
     # 1. Generic Segmentation (genseg) - SOTA validation data
@@ -823,6 +882,8 @@ val_datasets = [
         pad_image_to_square=True,
         #max_eval_samples=50,
     ),
+    
+    
     # 2b. Potsdam OVSeg — panoptic (PQ / SQ / RQ)
     dict(
         type=OVSegDataset,
@@ -1093,9 +1154,6 @@ val_datasets = [
         max_length=max_length,
         pad_image_to_square=True,
     ), 
-    
-    
-    
     # 3. Referring Segmentation (refseg) - RemoteSAM validation
     dict(
         type=RefSegDataset,
@@ -1253,7 +1311,7 @@ val_datasets = [
         pad_image_to_square=True,
         ignore_label=ignore_label,
     ),
-    # # 7. Referring Segmentation (refseg) - FAST val
+    # 7. Referring Segmentation (refseg) - FAST val
     dict(
         type=RefSegDataset,
         data_root="/mnt_llm_A100_V1/shui/oneterra_data/refseg/FAST",
@@ -1595,7 +1653,7 @@ val_datasets = [
     # 18. Image Conversation (Image Caption) - FIT-RSFG-Bench caption
     dict(
         type=ImgConvDataset,
-        data_path=imgconv_cc_data_root + "FIT-RSFG/FIT-RSFG-Bench/test_FITRS_image_caption_eval_qwenvl_debug.json",
+        data_path=imgconv_cc_data_root + "FIT-RSFG/FIT-RSFG-Bench/test_FITRS_image_caption_eval_qwenvl.json",
         tokenizer=tokenizer,
         cond_type=cond_type,
         special_tokens=special_tokens,
@@ -1623,7 +1681,7 @@ val_datasets = [
     # 19. Image Conversation (Region Caption) - FIT-RSFG-Bench region caption
     dict(
         type=ImgConvDataset,
-        data_path=imgconv_cc_data_root + "FIT-RSFG/FIT-RSFG-Bench/test_FITRS_region_caption_eval_qwen_debug.json",
+        data_path=imgconv_cc_data_root + "FIT-RSFG/FIT-RSFG-Bench/test_FITRS_region_caption_eval_qwen.json",
         tokenizer=tokenizer,
         cond_type=cond_type,
         special_tokens=special_tokens,
@@ -1707,7 +1765,7 @@ val_datasets = [
     # 22. Image Conversation (VQA) - FIT-RSRC
     dict(
         type=ImgConvDataset,
-        data_path=imgconv_cc_data_root + "FIT-RSRC/FIT-RSRC_Questions_2k_qwenvl_debug.json",
+        data_path=imgconv_cc_data_root + "FIT-RSRC/FIT-RSRC_Questions_2k_qwenvl.json",
         tokenizer=tokenizer,
         cond_type=cond_type,
         special_tokens=special_tokens,
@@ -1735,7 +1793,7 @@ val_datasets = [
     # 23. Image Conversation (VQA) - RSVQA_HR
     dict(
         type=ImgConvDataset,
-        data_path=imgconv_cc_data_root + "FIT-RSFG/FIT-RSFG-Bench/hrben_qwenvl_debug.json",
+        data_path=imgconv_cc_data_root + "FIT-RSFG/FIT-RSFG-Bench/hrben_qwenvl.json",
         tokenizer=tokenizer,
         cond_type=cond_type,
         special_tokens=special_tokens,
@@ -1763,7 +1821,7 @@ val_datasets = [
     # 24. Image Conversation (VQA) - RSVQA_LR
     dict(
         type=ImgConvDataset,
-        data_path=imgconv_cc_data_root + "FIT-RSFG/FIT-RSFG-Bench/lrben_qwenvl_debug.json",
+        data_path=imgconv_cc_data_root + "FIT-RSFG/FIT-RSFG-Bench/lrben_qwenvl.json",
         tokenizer=tokenizer,
         cond_type=cond_type,
         special_tokens=special_tokens,
@@ -1971,7 +2029,6 @@ val_evaluators = [
         data_name="panoptic_ovseg_pano_val",
         distributed=True,
     ),
-    # 2b–2d. Potsdam OVSeg (PQ/SQ/RQ, mIoU, mask AP)
     dict(
         type=OVSegEvaluator,
         data_name="potsdam_panoptic_ovseg_val",
@@ -2061,54 +2118,54 @@ val_evaluators = [
     dict(
         type=ReasonSegEvaluator,
         distributed=True,
-        data_name="reaseg_earthreason_test",
+       data_name="reaseg_earthreason_test",
     ),
     # 8. Reasoning Segmentation (reasonseg) - ReasonSeg validation
     dict(
         type=ReasonSegEvaluator,
         distributed=True,
-        data_name="reaseg_diy1_test",
+       data_name="reaseg_diy1_test",
     ),
     # 9. Image Conversation (Scene Classification) - WHU-RS19
     dict(
         type=ImgConvEvaluator,
         distributed=True,
         data_name="imgconv_WHU-RS19",
-        metrics=["accuracy"],
+        metrics= ["accuracy"],
     ),
     # 10. Image Conversation (Scene Classification) - AID
     dict(
         type=ImgConvEvaluator,
         distributed=True,
         data_name="imgconv_AID",
-        metrics=["accuracy"],
+        metrics= ["accuracy"],
     ),
     # 11. Image Conversation (Scene Classification) - NWPU-RESISC45
     dict(
         type=ImgConvEvaluator,
         distributed=True,
         data_name="imgconv_NWPU-RESISC45",
-        metrics=["accuracy"],
+        metrics= ["accuracy"],
     ),
     # 12. Image Conversation (Scene Classification) - SIRI-WHU
     dict(
         type=ImgConvEvaluator,
         distributed=True,
         data_name="imgconv_SIRI-WHU",
-        metrics=["accuracy"],
+        metrics= ["accuracy"],
     ),
     # 13. Image Conversation (Scene Classification) - UC_Merced
     dict(
         type=ImgConvEvaluator,
         distributed=True,
         data_name="imgconv_UC_Merced",
-        metrics=["accuracy"],
+        metrics= ["accuracy"],
     ),
     # 14. Image Conversation (Scene Classification) - AID multilabel
     dict(
         type=ImgConvMLSCEvaluator,
         distributed=True,
-        data_name="imgconv_AID_multilabel",
+        data_name="imgconv_AID_multilabel"
     ),
     # 15. Image Conversation (Image Caption) - UCM-Captions
     dict(
@@ -2122,7 +2179,7 @@ val_evaluators = [
         type=ImgConvEvaluator,
         distributed=True,
         data_name="imgconv_NWPU-Captions",
-        metrics=["meteor", "rougeL", "cider"],
+        metrics= ["meteor", "rougeL", "cider"],
     ),
     # 17. Image Conversation (VQA, complex conversation) - FIT-RSFG-Bench
     dict(
@@ -2183,7 +2240,7 @@ val_evaluators = [
         type=ImgConvEvaluator,
         distributed=True,
         data_name="imgconv_FuSAR_caption",
-        metrics=["bleu4", "meteor", "cider", "spice"],
+        metrics=["bleu4", "meteor", "cider","spice"],
     ),
     # 26. Image Conversation (Image Caption, SAR) - SARLANG_caption
     dict(
@@ -2225,27 +2282,12 @@ val_evaluators = [
 # 评测集过滤：只跑列表中的 data_name；设为 None 则跑全部 val 集。
 # xsam_eval_021_batch.sh 默认跑 Potsdam OVSeg（PQ/SQ/RQ + mIoU + mask AP）
 _eval_target_data_names = [
-  # "vaihingen_panoptic_ovseg_val",
-   #"vaihingen_semantic_ovseg_val",
-   #"vaihingen_instance_ovseg_val",
-   #"vaihingen_detection_ovseg_val",
-    #"potsdam_genseg_pano_val",
-    
-    #"potsdam_semantic_ovseg_val",
-    #"potsdam_panoptic_ovseg_val",
-    #"potsdam_instance_ovseg_val",
-    #"potsdam_detection_ovseg_val"
+    #"vaihingen_panoptic_ovseg_val",
+   # "vaihingen_semantic_ovseg_val",
+   # "vaihingen_instance_ovseg_val",
+    #"vaihingen_detection_ovseg_val",
     "panoptic_genseg_pano_val"
-    
-    
-    
-    #"imgconv_FIT-RSFG_Benchmark_VQA",
-    #"imgconv_FIT-RSFG_Benchmark_scene_classification",
-    #"imgconv_FuSAR_caption",
-    #"imgconv_FuSAR_VQA",
-    #"imgconv_SARLANG_caption",
-    #"imgconv_SAR-LANG_VQA",
-    #"refseg_rrsisd_test"
+    #"panoptic_ovseg_pano_val"
     
 ]
 # _eval_target_data_names = ["reaseg_earthreason_test"]
@@ -2256,9 +2298,8 @@ if _eval_target_data_names is not None:
 
 vis_datasets = deepcopy(val_datasets)
 for dataset in vis_datasets:
-   if dataset["task_name"] in ["genseg", "ovseg"]:
-       dataset["postprocess_fn"]["threshold"] = 0.5  # type: ignore
-
+    if dataset["task_name"] in ["genseg", "ovseg"]:
+        dataset["postprocess_fn"]["threshold"] = 0.5  # type: ignore
 
 #######################################################################
 #                    PART 4  Scheduler & Optimizer                    #
@@ -2331,9 +2372,18 @@ custom_hooks = [
         image_processor=image_processor,
         postprocess_fns=[
             None,  # imgconv
-            generic_seg_postprocess_fn,  # genseg
-            refer_seg_postprocess_fn,  # refseg
-            reason_seg_postprocess_fn,  # reaseg
+            # generic_seg_postprocess_fn,  # genseg
+            # refer_seg_postprocess_fn,  # refseg
+            # reason_seg_postprocess_fn,  # reaseg
+            # None,  # sar
+            # None,  # sar
+            # None,  # sar
+            # None,  # sar
+            # None,  # sar
+            # None,  # sar
+            # None,  # sar
+            # None,  # sar
+            # None,  # sar
         ],
         extra_image_processor=extra_image_processor,
         visualizer=visualizer,
@@ -2349,8 +2399,8 @@ custom_hooks = [
 
 # configure default hooks
 default_hooks = dict(
-    # 先对 loss 做跨卡 mean，再写 log，这样打印的是 64 卡平均 loss
-    dist_loss_reduce=dict(type=DistLossReduceHook),
+    # # 先对 loss 做跨卡 mean，再写 log，这样打印的是 64 卡平均 loss
+    # dist_loss_reduce=dict(type=DistLossReduceHook),
     # record the time of every iteration.
     timer=dict(type=IterTimerHook),
     # print log every 10 iterations.

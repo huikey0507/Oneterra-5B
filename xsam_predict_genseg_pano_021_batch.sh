@@ -11,7 +11,7 @@ DEFAULT_PTH_MODEL="./checkpoints/s3_mixed_fineture_base/xsam_phi3_mini_4k_instru
 
 PTH_MODEL="${1:-$DEFAULT_PTH_MODEL}"
 IMAGE_DIR="${2:-$ROOT_DIR/test_images}"
-OUT_DIR="${3:-$ROOT_DIR/predict_results_genseg_pano_021}"
+OUT_DIR="${3:-$ROOT_DIR/predict_results_genseg_pano_021_0528}"
 PANO_JSON="${4:-$ROOT_DIR/assets/annotations_val.json}"
 MAX_IMAGES="${5:--1}"
 # Number of GPUs to use (default: auto-detect via nvidia-smi, fallback to 1)

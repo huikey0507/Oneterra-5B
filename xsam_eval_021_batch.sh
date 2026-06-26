@@ -9,15 +9,20 @@ ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CODE_DIR="$ROOT_DIR/xsam"
 export PYTHONPATH="$CODE_DIR:${PYTHONPATH:-}"
 
-#CONFIG="./xsam/xsam/configs/xsam/phi3_mini_4k_instruct_siglip2_so400m_p14_384/s3_mixed_fineture_base/xsam_base_mixed_finetune_all.py"
-CONFIG="./xsam/xsam/configs/xsam/phi3_mini_4k_instruct_siglip2_so400m_p14_384/s3_mixed_fineture_021/xsam_021_siglip2_so400m_p14_384_sam_large_m2f_mixed_finetune_all_imgconv_optical_part1.py"
+CONFIG="./xsam/xsam/configs/xsam/phi3_mini_4k_instruct_siglip2_so400m_p14_384/s3_mixed_fineture_base/xsam_base_mixed_finetune_all.py"
+#CONFIG="./xsam/xsam/configs/xsam/phi3_mini_4k_instruct_siglip2_so400m_p14_384/s3_mixed_fineture_021/xsam_021_siglip2_so400m_p14_384_sam_large_m2f_mixed_finetune_all_imgconv_optical_part1.py"
 #CONFIG="/mnt_llm_A100_V1/shui/LAE/OneTerra-train/xsam/xsam/configs/xsam/phi3_mini_4k_instruct_siglip2_so400m_p14_384/s3_mixed_fineture_base/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_ovseg_subset_ft_flat.py"
 #DEFAULT_PTH_MODEL="./checkpoints/s3_mixed_fineture_base/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune_all_v1/pytorch_model.bin"
-#EFAULT_PTH_MODEL="./checkpoints/s3_mixed_fineture_base/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_ovseg_subset_ft_flat_v1/iter_30000.pth"
-DEFAULT_PTH_MODEL="/mnt_llm_A100_V1/yangsen/workspace/OneTerra-train-stage3/wkdrs_nanhu/s3_mixed_fineture_base/xsam_021_siglip2_so400m_p14_384_sam_large_m2f_mixed_finetune_all_nanhu_v1/pytorch_model.bin"
+#CONFIG="/mnt_llm_A100_V1/shui/LAE/RS-Xsam-main-old/xsam/xsam/configs/xsam/phi3_mini_4k_instruct_siglip2_so400m_p14_384/s3_mixed_fineture_base/xsam_v3_ultimate_4xA40_eval.py"
+
+
+
+DEFAULT_PTH_MODEL="./checkpoints/s3_mixed_fineture_base/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_ovseg_subset_ft_flat_v1/iter_30000.pth"
+#DEFAULT_PTH_MODEL="/mnt_llm_A100_V1/yangsen/workspace/OneTerra-train-stage3/wkdrs_nanhu/s3_mixed_fineture_base/xsam_021_siglip2_so400m_p14_384_sam_large_m2f_mixed_finetune_all_nanhu_v1/pytorch_model.bin"
+#DEFAULT_PTH_MODEL="/mnt_llm_A100_V1/shui/LAE/OneTerra-train/wkdrs_optimization_20260611/iter_110000.pth"
 
 PTH_MODEL="${1:-$DEFAULT_PTH_MODEL}"
-WORK_DIR="${2:-./eval_results_base_20260528_021/s3_mixed_finetune}"
+WORK_DIR="${2:-./eval_results_base_20260616/s3_v2_onlyovseg}"
 
 NGPU="${NGPU:-$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l || echo 1)}"
 BATCH_SIZE="${BATCH_SIZE:-1}"

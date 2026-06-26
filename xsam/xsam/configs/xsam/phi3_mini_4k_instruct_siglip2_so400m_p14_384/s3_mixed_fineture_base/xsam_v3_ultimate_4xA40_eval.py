@@ -1,3 +1,13 @@
+"""xsam_v3_ultimate_4xA40 训练配置对应的评测 / Demo 配置。
+
+- 模型结构、s1/s2 路径：与 OneTerra-train/xsam_v3_ultimate_4xA40.py 一致
+- val_datasets / visualizer / EvaluateChatHook 等：与 xsam_base_mixed_finetune_all.py 一致
+
+用法::
+    CONFIG=.../xsam_v3_ultimate_4xA40_eval.py
+    --pth_model .../wkdrs_v3_ultimate_4xA40/iter_31000.pth
+"""
+
 from copy import deepcopy
 from os import getenv
 
@@ -171,14 +181,97 @@ extra_image_processor = dict(
     ignore_index=0,
 )
 
+
+# v3 ultimate checkpoint paths & model
+base_root = "/mnt_llm_A100_V1/"
+code_dir = getenv("CODE_DIR", "./xsam/")
+data_dir = getenv("DATA_DIR", "./datas/")
+init_dir = getenv("INIT_DIR", "./inits/")
+work_dir = getenv("WORK_DIR", base_root + "shui/LAE/OneTerra-train/checkpoints/xsam_sota_ultimate")
+checkpoint_dir = base_root + "/shui/LAE/OneTerra-train/checkpoints/"
+
+# Model Paths
+llm_name_or_path = init_dir + "Phi-3-mini-4k-instruct"
+visual_encoder_name_or_path = init_dir + "siglip-so400m-patch14-384"
+seg_encoder_name_or_path = init_dir + "sam-vit-large"
+seg_decoder_name_or_path = init_dir + "mask2former-swin-large-coco-panoptic"
+
+# 与 ovseg_subset_ft_flat 相同：构建阶段先加载 S1/S2 底座
+s1_pretrained_pth = checkpoint_dir + "s1_seg_finetune/pytorch_model.bin"
+s2_pretrained_pth = (
+    checkpoint_dir + "xsam_s2_align_pretrain_skyscript_sar/iter_35874.pth"
+)
+
+# LoRA 与 V1 (mixed_finetune_all) 保持一致，确保 checkpoint 可完整加载
+llm_lora_config = dict(
+    type=LoraConfig,
+    r=16,
+    lora_alpha=32,
+    target_modules=[
+        "self_attn.qkv_proj",
+        "self_attn.o_proj",
+        "mlp.gate_up_proj",
+        "mlp.down_proj",
+    ],
+    lora_dropout=0.05,
+    bias="none",
+    task_type="CAUSAL_LM",
+)
+
+prompt_template = PROMPT_TEMPLATE.phi3_chat
+max_length = int(4096 - (384 / 14) ** 2 - 1024)
+
+# 4×A40：与 ovseg 一致 micro_batch=1，避免 SAM 1024² + dual_encoder OOM
+batch_size = 1
+accumulative_counts = 8
+dataloader_num_workers = 4 
+max_epochs = 2
+optim_type = AdamW
+lr = 2e-5            # 在冻结主干的情况下，用保守学习率微调 LoRA 和对齐层
+betas = (0.9, 0.999)
+weight_decay = 0.05
+max_norm = 1
+warmup_ratio = 0.03
+save_steps = 500
+save_total_limit = 3
+logging_interval = 10
+
+#######################################################################
+#            PART 2  Model & Tokenizer & Image Processor              #
+#######################################################################
+special_tokens = ["<SEG>", "<p>", "</p>"]
+cond_type = "phrase"
+ignore_label = 255
+
+tokenizer = dict(
+    type=AutoTokenizer.from_pretrained,
+    pretrained_model_name_or_path=llm_name_or_path,
+    trust_remote_code=True,
+    padding_side="right",
+)
+
+image_processor = dict(
+    type=SiglipProcessor.from_pretrained,
+    pretrained_model_name_or_path=visual_encoder_name_or_path,
+    trust_remote_code=True,
+)
+
+extra_image_processor = dict(
+    type=SamImageProcessor.from_pretrained,
+    pretrained_model_name_or_path=seg_encoder_name_or_path,
+    trust_remote_code=True,
+    ignore_index=0,
+)
+
+
 model = dict(
     type=XSamModel,
-    freeze_llm=False,  # 不冻结LLM，但使用LoRA微调（大幅节省显存）
-    freeze_visual_encoder=False,
-    freeze_segmentor_encoder=False,
+    freeze_llm=False,
+    freeze_visual_encoder=True,       # 🔒 锁定，极大节约显存
+    freeze_segmentor_encoder=True,    # 🔒 锁定，维持底层泛化边界能力
     use_dual_encoder=True,
     use_vision_sampler=True,
-    use_activation_checkpointing=True,  # 启用梯度检查点以节省内存
+    use_activation_checkpointing=True,
     connector_type="conv",
     cond_type=cond_type,
     seg_select_layers=[6, 12, 18, 24],
@@ -190,7 +283,7 @@ model = dict(
     s2_pretrained_pth=s2_pretrained_pth,
     tokenizer=tokenizer,
     postprocess_fn=generic_seg_postprocess_fn,
-    llm_lora=llm_lora_config,  # 添加LoRA配置，节省约45GB显存
+    llm_lora=llm_lora_config,
     llm=dict(
         type=AutoModelForCausalLM.from_pretrained,
         pretrained_model_name_or_path=llm_name_or_path,
@@ -225,13 +318,14 @@ model = dict(
             torch_dtype=torch.bfloat16,
         ),
         torch_dtype=torch.bfloat16,
-        reinit_decoder=True,
+        reinit_decoder=False, # 继承V1权重
         open_cls=True,
     ),
 )
 
+
 #######################################################################
-#                      PART 3  Dataset & Dataloader                   #
+#                      PART 3  Eval data paths                      #
 #######################################################################
 # 数据路径配置
 genseg_data_root = data_dir + "gen_seg_data/"
@@ -244,6 +338,22 @@ potsdam_root = "/mnt_llm_A100_V1/pxy/data/OVRSISS_test/Potsdam/"
 potsdam_pano_root = potsdam_root + "ann_dir/val_gt_remapped/gt_remap_panoptic_coco/"
 vaihingen_root = "/mnt_llm_A100_V1/pxy/data/OVRSISS_test/vaihingen/"
 vaihingen_pano_root = vaihingen_root + "ann_dir/val_gt_remapped/gt_remap_panoptic_coco/"
+
+imgconv_data_root = data_dir + "img_conv_data/"
+# 绝对路径基准，避免相对路径报错
+
+oneterra_data_root = base_root + "/shui/oneterra_data/"
+yangsen_data_root = base_root + "/yangsen/datasets/"
+
+fitrs_data_root = oneterra_data_root + "imgconv/FIT-RS/raw_data/"
+fitrs_imgconv_data_path = fitrs_data_root + "train_data_of_each_individual_task/"
+fitrs_imgconv_image_folder = fitrs_data_root + "imgv2_split_512_100_vaild"
+# 光学图像描述数据集路径
+optical_caption_data_root = oneterra_data_root + "imgconv/image_caption/"
+reasonseg_data_root = oneterra_data_root + "reasonseg/"
+
+# False for predict mode, True for tensor mode
+output_ids_with_output = True
 
 imgconv_data_root = data_dir + "img_conv_data/"
 # 绝对路径基准，避免相对路径报错
@@ -751,6 +861,7 @@ AID_multilabel_data_root = "/mnt_llm_A100_V1/yangsen/datasets/AID_multilabel/"
 
 # False for predict mode, True for tensor mode
 output_ids_with_output = True
+
 
 
 val_datasets = [
@@ -1567,7 +1678,7 @@ val_datasets = [
     # 17. Image Conversation (VQA, complex conversation) - FIT-RSFG-Bench
     dict(
         type=ImgConvDataset,
-        data_path=imgconv_cc_data_root + "FIT-RSFG/FIT-RSFG-Bench/test_FITRS_complex_comprehension_eval_qwenvl.json",
+        data_path=imgconv_cc_data_root + "FIT-RSFG/FIT-RSFG-Bench/test_FITRS_complex_comprehension_eval_qwenvl_debug.json",
         tokenizer=tokenizer,
         cond_type=cond_type,
         special_tokens=special_tokens,
@@ -1651,7 +1762,7 @@ val_datasets = [
     # 20. Image Conversation (VQA) - FIT-RSFG-Bench VQA
     dict(
         type=ImgConvDataset,
-        data_path=imgconv_cc_data_root + "FIT-RSFG/FIT-RSFG-Bench/test_FITRS_vqa_eval_qwenvl.json",
+        data_path=imgconv_cc_data_root + "FIT-RSFG/FIT-RSFG-Bench/test_FITRS_vqa_eval_qwenvl_debug.json",
         tokenizer=tokenizer,
         cond_type=cond_type,
         special_tokens=special_tokens,
@@ -1679,7 +1790,7 @@ val_datasets = [
     # 21. Image Conversation (Scene Classification) - FIT-RSFG-Bench scene classification
     dict(
         type=ImgConvDataset,
-        data_path=imgconv_cc_data_root + "FIT-RSFG/FIT-RSFG-Bench/test_FITRS_imageclassify_eval_qwenvl.json",
+        data_path=imgconv_cc_data_root + "FIT-RSFG/FIT-RSFG-Bench/test_FITRS_imageclassify_eval_qwenvl_debug.json",
         tokenizer=tokenizer,
         cond_type=cond_type,
         special_tokens=special_tokens,
@@ -2225,27 +2336,11 @@ val_evaluators = [
 # 评测集过滤：只跑列表中的 data_name；设为 None 则跑全部 val 集。
 # xsam_eval_021_batch.sh 默认跑 Potsdam OVSeg（PQ/SQ/RQ + mIoU + mask AP）
 _eval_target_data_names = [
-  # "vaihingen_panoptic_ovseg_val",
-   #"vaihingen_semantic_ovseg_val",
-   #"vaihingen_instance_ovseg_val",
-   #"vaihingen_detection_ovseg_val",
-    #"potsdam_genseg_pano_val",
-    
-    #"potsdam_semantic_ovseg_val",
-    #"potsdam_panoptic_ovseg_val",
-    #"potsdam_instance_ovseg_val",
-    #"potsdam_detection_ovseg_val"
+    #"vaihingen_panoptic_ovseg_val",
+   # "vaihingen_semantic_ovseg_val",
+   # "vaihingen_instance_ovseg_val",
+    #"vaihingen_detection_ovseg_val",
     "panoptic_genseg_pano_val"
-    
-    
-    
-    #"imgconv_FIT-RSFG_Benchmark_VQA",
-    #"imgconv_FIT-RSFG_Benchmark_scene_classification",
-    #"imgconv_FuSAR_caption",
-    #"imgconv_FuSAR_VQA",
-    #"imgconv_SARLANG_caption",
-    #"imgconv_SAR-LANG_VQA",
-    #"refseg_rrsisd_test"
     
 ]
 # _eval_target_data_names = ["reaseg_earthreason_test"]
@@ -2382,10 +2477,8 @@ env_cfg = dict(
 log_level = "INFO"
 
 # load from which checkpoint
-load_from = None
 
 # whether to resume training from the loaded checkpoint
-resume = False
 
 # Defaults to use random seed and disable `deterministic`
 randomness = dict(seed=None, deterministic=False)
@@ -2397,3 +2490,7 @@ log_processor = dict(
     mean_pattern=r".*(loss|time|data_time|grad_norm|tflops).*",
 )
 
+
+# 评测 / Demo 时权重由 --pth_model 指定
+load_from = None
+resume = False

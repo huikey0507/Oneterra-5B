@@ -362,11 +362,11 @@ class GradioApp:
             return error_msg, "", "", None
 
     def create_interface(self):
-        with gr.Blocks(title="遥感基础模型OneTerra-5B", css=custom_css, theme=gr.themes.Soft()) as app:
+        with gr.Blocks(title="遥感基础模型OneTerra", css=custom_css, theme=gr.themes.Soft()) as app:
             gr.HTML(
                 """
                 <div class="main-header">
-                    <h1>遥感基础模型OneTerra-5B</h1>
+                    <h1>遥感基础模型OneTerra</h1>
                     <h2>支持光学和SAR双模态，在统一框架下支持图像对话与问答理解（imgconv）、闭集全景/语义分割（genseg）、开放词汇分割（ovseg）、指代分割（refseg）与推理分割（reaseg），实现图像级语义理解、实例级目标识别、像素级精细分割与语言驱动可控推理的一体化解译能力</h2>
                 </div>
             """
@@ -408,7 +408,7 @@ class GradioApp:
                             value=0.0,
                             step=0.01,
                             interactive=True,
-                            label="分数阈值（refseg/reaseg 等；genseg/ovseg 固定为 0）",
+                            label="分数阈值（imgconv 无效；genseg/ovseg 固定为 0；refseg/reaseg 用后处理阈值）",
                             elem_classes="score-threshold",
                         )
 

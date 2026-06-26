@@ -7,12 +7,12 @@ CODE_DIR="$ROOT_DIR/xsam"
 export PYTHONPATH="$CODE_DIR:${PYTHONPATH:-}"
 
 CONFIG="./xsam/xsam/configs/xsam/phi3_mini_4k_instruct_siglip2_so400m_p14_384/s3_mixed_fineture_base/xsam_base_mixed_finetune_all.py"
-DEFAULT_PTH_MODEL="/mnt_llm_A100_V1/shui/LAE/OneTerra-train/wkdrs/s3_mixed_fineture_base/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune_all_v1/pytorch_model.bin"
+DEFAULT_PTH_MODEL="./checkpoints/s3_mixed_fineture_base/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_mixed_finetune_all_v1/pytorch_model.bin"
 
 PTH_MODEL="${1:-$DEFAULT_PTH_MODEL}"
 IMAGE_DIR="${2:-$ROOT_DIR/datas/pano/val/images}"
-OUT_DIR="${3:-$ROOT_DIR/predict_results_genseg_pano_021}"
-PANO_JSON="${4:-$ROOT_DIR/assets/pano/annotations_val.json}"
+OUT_DIR="${3:-$ROOT_DIR/predict_results_genseg_pano_021_0528}"
+PANO_JSON="${4:-$ROOT_DIR/assets/annotations_val.json}"
 MAX_IMAGES="${5:--1}"
 
 if [ ! -f "$PTH_MODEL" ] && [ ! -d "$PTH_MODEL" ]; then

@@ -59,8 +59,8 @@ import xsam.engine.runners.loops
 #                          PART 1  Settings                           #
 #######################################################################
 # Directories
-base_root = "/mnt/si001883vtjl"
-# base_root = "/mnt_llm_A100_V1"
+#base_root = "/mnt/si001883vtjl"
+base_root = "/mnt_llm_A100_V1"
 code_dir = getenv("CODE_DIR", "./xsam/")
 data_dir = getenv("DATA_DIR", "./datas/")
 init_dir = getenv("INIT_DIR", "./inits/")

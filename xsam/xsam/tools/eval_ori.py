@@ -50,6 +50,10 @@ from xsam.utils.utils import register_function
 from xsam.dataset.utils.process import sem_seg_postprocess
 from xsam.structures import BitMasks, Instances
 from xsam.utils.visualize import Visualizer as XSamVisualizer
+from xsam.utils.xtuner_patch import patch_xtuner_llama_attn_for_single_gpu
+
+# Xtuner llama_attn_forward calls dist.get_rank(); single-GPU eval (launcher=none) has no process group.
+patch_xtuner_llama_attn_for_single_gpu()
 
 # Global setup
 set_default_logging_format()

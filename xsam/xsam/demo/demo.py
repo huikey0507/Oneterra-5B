@@ -67,6 +67,10 @@ from xsam.demo.genseg_pano_utils import (
 from xsam.utils.misc import data_dict_to_device
 from xsam.utils.utils import register_function
 from xsam.utils.visualize import Visualizer
+from xsam.utils.xtuner_patch import patch_xtuner_llama_attn_for_single_gpu
+
+# Xtuner llama_attn_forward calls dist.get_rank(); demo runs without init_process_group.
+patch_xtuner_llama_attn_for_single_gpu()
 
 # Global setup
 set_default_logging_format()
@@ -477,8 +481,8 @@ class XSamDemo:
 
     @staticmethod
     def _uses_tensor_infer(task_name: str) -> bool:
-        """genseg/ovseg 与 eval、predict_genseg_pano 一致走 tensor 前向。"""
-        return task_name in ("genseg", "ovseg") or "genseg" in task_name
+        """与 eval_ori 一致：分割类 val 使用 output_ids_with_output=True → tensor（genseg 另有 run_genseg_pano_predict）。"""
+        return task_name in ("genseg", "ovseg", "refseg", "reaseg") or "genseg" in task_name
 
     def _input_ids_with_output_for_task(self, task_name: str) -> bool:
         if self._uses_tensor_infer(task_name):
