@@ -53,6 +53,7 @@ from xsam.model.segmentors import XSegmentor
 from xsam.model.segmentors.mask2former import Mask2FormerConfig, Mask2FormerModel
 from xsam.model.segmentors.sam import SamModel
 from xsam.utils.visualize import Visualizer
+from xsam.utils.visualize_eval import EvalVisualizer
 import xsam.engine.runners.loops
 
 
@@ -244,6 +245,21 @@ potsdam_root = "/mnt_llm_A100_V1/pxy/data/OVRSISS_test/Potsdam/"
 potsdam_pano_root = potsdam_root + "ann_dir/val_gt_remapped/gt_remap_panoptic_coco/"
 vaihingen_root = "/mnt_llm_A100_V1/pxy/data/OVRSISS_test/vaihingen/"
 vaihingen_pano_root = vaihingen_root + "ann_dir/val_gt_remapped/gt_remap_panoptic_coco/"
+# FloodNet OVRSISS (open-vocabulary panoptic / semantic / instance; val+test)
+floodnet_root = "/mnt_llm_A100_V1/pxy/data/OVRSISS_test/FloodNet/val+test/"
+floodnet_pano_root = floodnet_root + "gt_remap_panoptic_coco_resized/"
+# FAST OVRSISS (open-vocabulary panoptic / semantic / instance; all 37 cats are things)
+fast_root = "/mnt_llm_A100_V1/pxy/data/OVRSISS_test/FAST/val/"
+fast_pano_root = fast_root + "gt_remap_panoptic_coco/"
+# iSAID OVRSISS (open-vocabulary panoptic / semantic / instance; 15 thing classes)
+isaid_root = "/mnt_llm_A100_V1/pxy/data/OVRSISS_test/iSAID/"
+isaid_pano_root = isaid_root + "ann_dir/val/gt_remap_panoptic_coco/"
+isaid_img_folder = isaid_root + "img_dir/val/"
+isaid_semseg_folder = isaid_root + "ann_dir/val/gt_id_remap/"
+# DIOR-R (OBB detection; COCO JSON converted from YOLODIOR-R)
+dior_r_root = "/mnt_llm_A100_V1/shui/data/DIOR-R/"
+dior_r_ann_root = dior_r_root + "annotations/"
+dior_r_img_root = dior_r_root + "YOLODIOR-R/"
 
 imgconv_data_root = data_dir + "img_conv_data/"
 # 绝对路径基准，避免相对路径报错
@@ -823,6 +839,40 @@ val_datasets = [
         pad_image_to_square=True,
         #max_eval_samples=50,
     ),
+    # 2a. Pano OVSeg — semantic (mIoU; GT from panoptic→class-id remap in val/seg_labels)
+    dict(
+        type=OVSegDataset,
+        data_path=pano_data_root + "annotations_val.json",
+        image_folder=pano_data_root + "val/images",
+        semseg_map_folder=pano_data_root + "val/seg_labels",
+        ignore_label=0,
+        data_mode="eval",
+        tokenizer=tokenizer,
+        task_name="ovseg",
+        data_name="rs_semantic_ovseg_val",
+        output_ids_with_output=output_ids_with_output,
+        cond_type=cond_type,
+        special_tokens=special_tokens,
+        image_processor=image_processor,
+        extra_image_processor=extra_image_processor,
+        dataset_map_fn=dict(
+            type=dataset_map_fn_factory,
+            fn=ov_seg_map_fn,
+            cond_type=cond_type,
+        ),
+        postprocess_fn=dict(
+            type=process_map_fn_factory,
+            fn=ov_seg_postprocess_fn,
+            task_name="semantic_ovseg",
+        ),
+        template_map_fn=dict(
+            type=template_map_fn_factory,
+            template=prompt_template,
+            output_suffix=output_ids_with_output,
+        ),
+        max_length=max_length,
+        pad_image_to_square=True,
+    ),
     # 2b. Potsdam OVSeg — panoptic (PQ / SQ / RQ)
     dict(
         type=OVSegDataset,
@@ -833,6 +883,42 @@ val_datasets = [
         tokenizer=tokenizer,
         task_name="ovseg",
         data_name="potsdam_panoptic_ovseg_val",
+        output_ids_with_output=output_ids_with_output,
+        cond_type=cond_type,
+        special_tokens=special_tokens,
+        image_processor=image_processor,
+        extra_image_processor=extra_image_processor,
+        dataset_map_fn=dict(
+            type=dataset_map_fn_factory,
+            fn=ov_seg_map_fn,
+            cond_type=cond_type,
+        ),
+        postprocess_fn=dict(
+            type=process_map_fn_factory,
+            fn=ov_seg_postprocess_fn,
+            task_name="panoptic_ovseg",
+            threshold=0.0,
+        ),
+        template_map_fn=dict(
+            type=template_map_fn_factory,
+            template=prompt_template,
+            output_suffix=output_ids_with_output,
+        ),
+        max_length=max_length,
+        pad_image_to_square=True,
+    ),
+    # 2b-alias. Potsdam OVSeg — panoptic with pano-vocabulary class names (ids unchanged)
+    # building→residential_area, car→small_vehicle, impervious surface→road,
+    # low vegetation→grassland, tree→forest
+    dict(
+        type=OVSegDataset,
+        data_path=potsdam_pano_root + "annotations/panoptic_annotations_pano_alias.json",
+        image_folder=potsdam_root + "img_dir/val/",
+        panseg_map_folder=potsdam_pano_root + "panoptic_rgb_ids/",
+        data_mode="eval",
+        tokenizer=tokenizer,
+        task_name="ovseg",
+        data_name="potsdam_panoptic_ovseg_val_panoalias",
         output_ids_with_output=output_ids_with_output,
         cond_type=cond_type,
         special_tokens=special_tokens,
@@ -1059,7 +1145,7 @@ val_datasets = [
         max_length=max_length,
         pad_image_to_square=True,
     ),
-    # 2e. Potsdam OVSeg — object detection (mAP/AP50/AP75; hbox or rbox auto-detected from GT)
+    # 2e. Vaihingen OVSeg — object detection (mAP/AP50/AP75; hbox or rbox auto-detected from GT)
     dict(
         type=OVSegDataset,
         data_path=vaihingen_pano_root + "annotations/instance_annotations.json",  # 或纯检测 COCO JSON（可仅含 bbox，可含 5 参数旋转框）
@@ -1092,10 +1178,447 @@ val_datasets = [
         ),
         max_length=max_length,
         pad_image_to_square=True,
-    ), 
-    
-    
-    
+    ),
+    # 2g. FloodNet OVSeg — panoptic (PQ / SQ / RQ)
+    dict(
+        type=OVSegDataset,
+        data_path=floodnet_pano_root + "annotations/panoptic_annotations.json",
+        image_folder=floodnet_root + "img_resized/",
+        panseg_map_folder=floodnet_pano_root + "panoptic_rgb_ids/",
+        data_mode="eval",
+        tokenizer=tokenizer,
+        task_name="ovseg",
+        data_name="floodnet_panoptic_ovseg_val",
+        output_ids_with_output=output_ids_with_output,
+        cond_type=cond_type,
+        special_tokens=special_tokens,
+        image_processor=image_processor,
+        extra_image_processor=extra_image_processor,
+        dataset_map_fn=dict(
+            type=dataset_map_fn_factory,
+            fn=ov_seg_map_fn,
+            cond_type=cond_type,
+        ),
+        postprocess_fn=dict(
+            type=process_map_fn_factory,
+            fn=ov_seg_postprocess_fn,
+            task_name="panoptic_ovseg",
+            threshold=0.0,
+        ),
+        template_map_fn=dict(
+            type=template_map_fn_factory,
+            template=prompt_template,
+            output_suffix=output_ids_with_output,
+        ),
+        max_length=max_length,
+        pad_image_to_square=True,
+    ),
+    # 2h. FloodNet OVSeg — semantic (mIoU, 9 classes; id=9 background ignored)
+    dict(
+        type=OVSegDataset,
+        data_path=floodnet_pano_root + "annotations/panoptic_annotations.json",
+        image_folder=floodnet_root + "img_resized/",
+        semseg_map_folder=floodnet_root + "gt_remapped/remap_cocopano_gt_id_resized/",
+        ignore_label=9,
+        data_mode="eval",
+        tokenizer=tokenizer,
+        task_name="ovseg",
+        data_name="floodnet_semantic_ovseg_val",
+        output_ids_with_output=output_ids_with_output,
+        cond_type=cond_type,
+        special_tokens=special_tokens,
+        image_processor=image_processor,
+        extra_image_processor=extra_image_processor,
+        dataset_map_fn=dict(
+            type=dataset_map_fn_factory,
+            fn=ov_seg_map_fn,
+            cond_type=cond_type,
+        ),
+        postprocess_fn=dict(
+            type=process_map_fn_factory,
+            fn=ov_seg_postprocess_fn,
+            task_name="semantic_ovseg",
+        ),
+        template_map_fn=dict(
+            type=template_map_fn_factory,
+            template=prompt_template,
+            output_suffix=output_ids_with_output,
+        ),
+        max_length=max_length,
+        pad_image_to_square=True,
+    ),
+    # 2i. FloodNet OVSeg — instance mask (AP / AP50, thing: building-flooded/non-flooded, vehicle, pool)
+    dict(
+        type=OVSegDataset,
+        data_path=floodnet_pano_root + "annotations/instance_annotations.json",
+        image_folder=floodnet_root + "img_resized/",
+        data_mode="eval",
+        tokenizer=tokenizer,
+        task_name="ovseg",
+        data_name="floodnet_instance_ovseg_val",
+        output_ids_with_output=output_ids_with_output,
+        cond_type=cond_type,
+        special_tokens=special_tokens,
+        image_processor=image_processor,
+        extra_image_processor=extra_image_processor,
+        dataset_map_fn=dict(
+            type=dataset_map_fn_factory,
+            fn=ov_seg_map_fn,
+            cond_type=cond_type,
+        ),
+        postprocess_fn=dict(
+            type=process_map_fn_factory,
+            fn=ov_seg_postprocess_fn,
+            task_name="instance_ovseg",
+            threshold=0.0,
+        ),
+        template_map_fn=dict(
+            type=template_map_fn_factory,
+            template=prompt_template,
+            output_suffix=output_ids_with_output,
+        ),
+        max_length=max_length,
+        pad_image_to_square=True,
+    ),
+    # 2j. FloodNet OVSeg — object detection (mAP/AP50/AP75)
+    dict(
+        type=OVSegDataset,
+        data_path=floodnet_pano_root + "annotations/instance_annotations.json",
+        image_folder=floodnet_root + "img_resized/",
+        data_mode="eval",
+        tokenizer=tokenizer,
+        task_name="ovseg",
+        data_name="floodnet_detection_ovseg_val",
+        output_ids_with_output=output_ids_with_output,
+        cond_type=cond_type,
+        special_tokens=special_tokens,
+        image_processor=image_processor,
+        extra_image_processor=extra_image_processor,
+        dataset_map_fn=dict(
+            type=dataset_map_fn_factory,
+            fn=ov_seg_map_fn,
+            cond_type=cond_type,
+        ),
+        postprocess_fn=dict(
+            type=process_map_fn_factory,
+            fn=ov_seg_postprocess_fn,
+            task_name="detection_ovseg",
+            threshold=0.1,
+            nms_threshold=0.5,
+        ),
+        template_map_fn=dict(
+            type=template_map_fn_factory,
+            template=prompt_template,
+            output_suffix=output_ids_with_output,
+        ),
+        max_length=max_length,
+        pad_image_to_square=True,
+    ),
+    # 2k. FAST OVSeg — panoptic (PQ / SQ / RQ)
+    dict(
+        type=OVSegDataset,
+        data_path=fast_pano_root + "annotations/panoptic_annotations.json",
+        image_folder=fast_root + "images/",
+        panseg_map_folder=fast_pano_root + "panoptic_rgb_ids/",
+        data_mode="eval",
+        tokenizer=tokenizer,
+        task_name="ovseg",
+        data_name="fast_panoptic_ovseg_val",
+        output_ids_with_output=output_ids_with_output,
+        cond_type=cond_type,
+        special_tokens=special_tokens,
+        image_processor=image_processor,
+        extra_image_processor=extra_image_processor,
+        dataset_map_fn=dict(
+            type=dataset_map_fn_factory,
+            fn=ov_seg_map_fn,
+            cond_type=cond_type,
+        ),
+        postprocess_fn=dict(
+            type=process_map_fn_factory,
+            fn=ov_seg_postprocess_fn,
+            task_name="panoptic_ovseg",
+            threshold=0.0,
+        ),
+        template_map_fn=dict(
+            type=template_map_fn_factory,
+            template=prompt_template,
+            output_suffix=output_ids_with_output,
+        ),
+        max_length=max_length,
+        pad_image_to_square=True,
+    ),
+    # 2l. FAST OVSeg — semantic (mIoU, 37 classes; id=255 background ignored)
+    dict(
+        type=OVSegDataset,
+        data_path=fast_pano_root + "annotations/panoptic_annotations.json",
+        image_folder=fast_root + "images/",
+        semseg_map_folder=fast_root + "semlabels/gray/",
+        ignore_label=255,
+        data_mode="eval",
+        tokenizer=tokenizer,
+        task_name="ovseg",
+        data_name="fast_semantic_ovseg_val",
+        output_ids_with_output=output_ids_with_output,
+        cond_type=cond_type,
+        special_tokens=special_tokens,
+        image_processor=image_processor,
+        extra_image_processor=extra_image_processor,
+        dataset_map_fn=dict(
+            type=dataset_map_fn_factory,
+            fn=ov_seg_map_fn,
+            cond_type=cond_type,
+        ),
+        postprocess_fn=dict(
+            type=process_map_fn_factory,
+            fn=ov_seg_postprocess_fn,
+            task_name="semantic_ovseg",
+        ),
+        template_map_fn=dict(
+            type=template_map_fn_factory,
+            template=prompt_template,
+            output_suffix=output_ids_with_output,
+        ),
+        max_length=max_length,
+        pad_image_to_square=True,
+    ),
+    # 2m. FAST OVSeg — instance mask (AP / AP50, 37 thing classes)
+    dict(
+        type=OVSegDataset,
+        data_path=fast_pano_root + "annotations/instance_annotations.json",
+        image_folder=fast_root + "images/",
+        data_mode="eval",
+        tokenizer=tokenizer,
+        task_name="ovseg",
+        data_name="fast_instance_ovseg_val",
+        output_ids_with_output=output_ids_with_output,
+        cond_type=cond_type,
+        special_tokens=special_tokens,
+        image_processor=image_processor,
+        extra_image_processor=extra_image_processor,
+        dataset_map_fn=dict(
+            type=dataset_map_fn_factory,
+            fn=ov_seg_map_fn,
+            cond_type=cond_type,
+        ),
+        postprocess_fn=dict(
+            type=process_map_fn_factory,
+            fn=ov_seg_postprocess_fn,
+            task_name="instance_ovseg",
+            threshold=0.0,
+        ),
+        template_map_fn=dict(
+            type=template_map_fn_factory,
+            template=prompt_template,
+            output_suffix=output_ids_with_output,
+        ),
+        max_length=max_length,
+        pad_image_to_square=True,
+    ),
+    # 2n. FAST OVSeg — object detection (mAP/AP50/AP75)
+    dict(
+        type=OVSegDataset,
+        data_path=fast_pano_root + "annotations/instance_annotations.json",
+        image_folder=fast_root + "images/",
+        data_mode="eval",
+        tokenizer=tokenizer,
+        task_name="ovseg",
+        data_name="fast_detection_ovseg_val",
+        output_ids_with_output=output_ids_with_output,
+        cond_type=cond_type,
+        special_tokens=special_tokens,
+        image_processor=image_processor,
+        extra_image_processor=extra_image_processor,
+        dataset_map_fn=dict(
+            type=dataset_map_fn_factory,
+            fn=ov_seg_map_fn,
+            cond_type=cond_type,
+        ),
+        postprocess_fn=dict(
+            type=process_map_fn_factory,
+            fn=ov_seg_postprocess_fn,
+            task_name="detection_ovseg",
+            threshold=0.1,
+            nms_threshold=0.5,
+        ),
+        template_map_fn=dict(
+            type=template_map_fn_factory,
+            template=prompt_template,
+            output_suffix=output_ids_with_output,
+        ),
+        max_length=max_length,
+        pad_image_to_square=True,
+    ),
+    # 2o. iSAID OVSeg — panoptic (PQ / SQ / RQ)
+    dict(
+        type=OVSegDataset,
+        data_path=isaid_pano_root + "annotations/panoptic_annotations.json",
+        image_folder=isaid_img_folder,
+        panseg_map_folder=isaid_pano_root + "panoptic_rgb_ids/",
+        data_mode="eval",
+        tokenizer=tokenizer,
+        task_name="ovseg",
+        data_name="isaid_panoptic_ovseg_val",
+        output_ids_with_output=output_ids_with_output,
+        cond_type=cond_type,
+        special_tokens=special_tokens,
+        image_processor=image_processor,
+        extra_image_processor=extra_image_processor,
+        dataset_map_fn=dict(
+            type=dataset_map_fn_factory,
+            fn=ov_seg_map_fn,
+            cond_type=cond_type,
+        ),
+        postprocess_fn=dict(
+            type=process_map_fn_factory,
+            fn=ov_seg_postprocess_fn,
+            task_name="panoptic_ovseg",
+            threshold=0.0,
+        ),
+        template_map_fn=dict(
+            type=template_map_fn_factory,
+            template=prompt_template,
+            output_suffix=output_ids_with_output,
+        ),
+        max_length=max_length,
+        pad_image_to_square=True,
+    ),
+    # 2p. iSAID OVSeg — semantic (mIoU, 15 classes; id=255 background ignored)
+    dict(
+        type=OVSegDataset,
+        data_path=isaid_pano_root + "annotations/panoptic_annotations.json",
+        image_folder=isaid_img_folder,
+        semseg_map_folder=isaid_semseg_folder,
+        ignore_label=255,
+        data_mode="eval",
+        tokenizer=tokenizer,
+        task_name="ovseg",
+        data_name="isaid_semantic_ovseg_val",
+        output_ids_with_output=output_ids_with_output,
+        cond_type=cond_type,
+        special_tokens=special_tokens,
+        image_processor=image_processor,
+        extra_image_processor=extra_image_processor,
+        dataset_map_fn=dict(
+            type=dataset_map_fn_factory,
+            fn=ov_seg_map_fn,
+            cond_type=cond_type,
+        ),
+        postprocess_fn=dict(
+            type=process_map_fn_factory,
+            fn=ov_seg_postprocess_fn,
+            task_name="semantic_ovseg",
+        ),
+        template_map_fn=dict(
+            type=template_map_fn_factory,
+            template=prompt_template,
+            output_suffix=output_ids_with_output,
+        ),
+        max_length=max_length,
+        pad_image_to_square=True,
+    ),
+    # 2q. iSAID OVSeg — instance mask (AP / AP50, 15 thing classes)
+    dict(
+        type=OVSegDataset,
+        data_path=isaid_pano_root + "annotations/instance_annotations.json",
+        image_folder=isaid_img_folder,
+        data_mode="eval",
+        tokenizer=tokenizer,
+        task_name="ovseg",
+        data_name="isaid_instance_ovseg_val",
+        output_ids_with_output=output_ids_with_output,
+        cond_type=cond_type,
+        special_tokens=special_tokens,
+        image_processor=image_processor,
+        extra_image_processor=extra_image_processor,
+        dataset_map_fn=dict(
+            type=dataset_map_fn_factory,
+            fn=ov_seg_map_fn,
+            cond_type=cond_type,
+        ),
+        postprocess_fn=dict(
+            type=process_map_fn_factory,
+            fn=ov_seg_postprocess_fn,
+            task_name="instance_ovseg",
+            threshold=0.0,
+        ),
+        template_map_fn=dict(
+            type=template_map_fn_factory,
+            template=prompt_template,
+            output_suffix=output_ids_with_output,
+        ),
+        max_length=max_length,
+        pad_image_to_square=True,
+    ),
+    # 2r. iSAID OVSeg — object detection (mAP/AP50/AP75)
+    dict(
+        type=OVSegDataset,
+        data_path=isaid_pano_root + "annotations/instance_annotations.json",
+        image_folder=isaid_img_folder,
+        data_mode="eval",
+        tokenizer=tokenizer,
+        task_name="ovseg",
+        data_name="isaid_detection_ovseg_val",
+        output_ids_with_output=output_ids_with_output,
+        cond_type=cond_type,
+        special_tokens=special_tokens,
+        image_processor=image_processor,
+        extra_image_processor=extra_image_processor,
+        dataset_map_fn=dict(
+            type=dataset_map_fn_factory,
+            fn=ov_seg_map_fn,
+            cond_type=cond_type,
+        ),
+        postprocess_fn=dict(
+            type=process_map_fn_factory,
+            fn=ov_seg_postprocess_fn,
+            task_name="detection_ovseg",
+            threshold=0.1,
+            nms_threshold=0.5,
+        ),
+        template_map_fn=dict(
+            type=template_map_fn_factory,
+            template=prompt_template,
+            output_suffix=output_ids_with_output,
+        ),
+        max_length=max_length,
+        pad_image_to_square=True,
+    ),
+    # 2f. DIOR-R OVSeg — oriented object detection (rbox mAP/AP50/AP75; test split)
+    dict(
+        type=OVSegDataset,
+        data_path=dior_r_ann_root + "dior_r_test_coco.json",
+        image_folder=dior_r_img_root + "test/images/",
+        data_mode="eval",
+        tokenizer=tokenizer,
+        task_name="ovseg",
+        data_name="dior_r_detection_ovseg_test",
+        output_ids_with_output=output_ids_with_output,
+        cond_type=cond_type,
+        special_tokens=special_tokens,
+        image_processor=image_processor,
+        extra_image_processor=extra_image_processor,
+        dataset_map_fn=dict(
+            type=dataset_map_fn_factory,
+            fn=ov_seg_map_fn,
+            cond_type=cond_type,
+        ),
+        postprocess_fn=dict(
+            type=process_map_fn_factory,
+            fn=ov_seg_postprocess_fn,
+            task_name="detection_ovseg",
+            threshold=0.2,
+            nms_threshold=0.3,
+        ),
+        template_map_fn=dict(
+            type=template_map_fn_factory,
+            template=prompt_template,
+            output_suffix=output_ids_with_output,
+        ),
+        max_length=max_length,
+        pad_image_to_square=True,
+    ),
+
     # 3. Referring Segmentation (refseg) - RemoteSAM validation
     dict(
         type=RefSegDataset,
@@ -1595,7 +2118,7 @@ val_datasets = [
     # 18. Image Conversation (Image Caption) - FIT-RSFG-Bench caption
     dict(
         type=ImgConvDataset,
-        data_path=imgconv_cc_data_root + "FIT-RSFG/FIT-RSFG-Bench/test_FITRS_image_caption_eval_qwenvl_debug.json",
+        data_path=imgconv_cc_data_root + "FIT-RSFG/FIT-RSFG-Bench/test_FITRS_image_caption_eval_qwenvl.json",
         tokenizer=tokenizer,
         cond_type=cond_type,
         special_tokens=special_tokens,
@@ -1623,7 +2146,7 @@ val_datasets = [
     # 19. Image Conversation (Region Caption) - FIT-RSFG-Bench region caption
     dict(
         type=ImgConvDataset,
-        data_path=imgconv_cc_data_root + "FIT-RSFG/FIT-RSFG-Bench/test_FITRS_region_caption_eval_qwen_debug.json",
+        data_path=imgconv_cc_data_root + "FIT-RSFG/FIT-RSFG-Bench/test_FITRS_region_caption_eval_qwen.json",
         tokenizer=tokenizer,
         cond_type=cond_type,
         special_tokens=special_tokens,
@@ -1735,7 +2258,7 @@ val_datasets = [
     # 23. Image Conversation (VQA) - RSVQA_HR
     dict(
         type=ImgConvDataset,
-        data_path=imgconv_cc_data_root + "FIT-RSFG/FIT-RSFG-Bench/hrben_qwenvl_debug.json",
+        data_path=imgconv_cc_data_root + "FIT-RSFG/FIT-RSFG-Bench/hrben_qwenvl.json",
         tokenizer=tokenizer,
         cond_type=cond_type,
         special_tokens=special_tokens,
@@ -1763,7 +2286,7 @@ val_datasets = [
     # 24. Image Conversation (VQA) - RSVQA_LR
     dict(
         type=ImgConvDataset,
-        data_path=imgconv_cc_data_root + "FIT-RSFG/FIT-RSFG-Bench/lrben_qwenvl_debug.json",
+        data_path=imgconv_cc_data_root + "FIT-RSFG/FIT-RSFG-Bench/lrben_qwenvl.json",
         tokenizer=tokenizer,
         cond_type=cond_type,
         special_tokens=special_tokens,
@@ -1971,10 +2494,22 @@ val_evaluators = [
         data_name="panoptic_ovseg_pano_val",
         distributed=True,
     ),
+    dict(
+        type=OVSegEvaluator,
+        data_name="rs_semantic_ovseg_val",
+        distributed=True,
+        show_categories=True,
+    ),
     # 2b–2d. Potsdam OVSeg (PQ/SQ/RQ, mIoU, mask AP)
     dict(
         type=OVSegEvaluator,
         data_name="potsdam_panoptic_ovseg_val",
+        distributed=True,
+        show_categories=True,
+    ),
+    dict(
+        type=OVSegEvaluator,
+        data_name="potsdam_panoptic_ovseg_val_panoalias",
         distributed=True,
         show_categories=True,
     ),
@@ -2018,6 +2553,88 @@ val_evaluators = [
     dict(
         type=OVSegEvaluator,
         data_name="vaihingen_detection_ovseg_val",
+        distributed=True,
+        show_categories=True,
+    ),
+    # 2g–2j. FloodNet OVSeg (PQ/SQ/RQ, mIoU, mask AP, det mAP)
+    dict(
+        type=OVSegEvaluator,
+        data_name="floodnet_panoptic_ovseg_val",
+        distributed=True,
+        show_categories=True,
+    ),
+    dict(
+        type=OVSegEvaluator,
+        data_name="floodnet_semantic_ovseg_val",
+        distributed=True,
+        show_categories=True,
+    ),
+    dict(
+        type=OVSegEvaluator,
+        data_name="floodnet_instance_ovseg_val",
+        distributed=True,
+        show_categories=True,
+    ),
+    dict(
+        type=OVSegEvaluator,
+        data_name="floodnet_detection_ovseg_val",
+        distributed=True,
+        show_categories=True,
+    ),
+    # 2k–2n. FAST OVSeg (PQ/SQ/RQ, mIoU, mask AP, det mAP)
+    dict(
+        type=OVSegEvaluator,
+        data_name="fast_panoptic_ovseg_val",
+        distributed=True,
+        show_categories=True,
+    ),
+    dict(
+        type=OVSegEvaluator,
+        data_name="fast_semantic_ovseg_val",
+        distributed=True,
+        show_categories=True,
+    ),
+    dict(
+        type=OVSegEvaluator,
+        data_name="fast_instance_ovseg_val",
+        distributed=True,
+        show_categories=True,
+    ),
+    dict(
+        type=OVSegEvaluator,
+        data_name="fast_detection_ovseg_val",
+        distributed=True,
+        show_categories=True,
+    ),
+    # 2o–2r. iSAID OVSeg (PQ/SQ/RQ, mIoU, mask AP, det mAP)
+    dict(
+        type=OVSegEvaluator,
+        data_name="isaid_panoptic_ovseg_val",
+        distributed=True,
+        show_categories=True,
+    ),
+    dict(
+        type=OVSegEvaluator,
+        data_name="isaid_semantic_ovseg_val",
+        distributed=True,
+        show_categories=True,
+    ),
+    dict(
+        type=OVSegEvaluator,
+        data_name="isaid_instance_ovseg_val",
+        distributed=True,
+        show_categories=True,
+    ),
+    dict(
+        type=OVSegEvaluator,
+        data_name="isaid_detection_ovseg_val",
+        distributed=True,
+        show_categories=True,
+    ),
+    # 2f. DIOR-R OVSeg — oriented object detection (test)
+    dict(
+        type=OVSegEvaluator,
+        data_name="dior_r_detection_ovseg_test",
         distributed=True,
         show_categories=True,
     ),
@@ -2223,29 +2840,56 @@ val_evaluators = [
 ]
 
 # 评测集过滤：只跑列表中的 data_name；设为 None 则跑全部 val 集。
-# xsam_eval_021_batch.sh 默认跑 Potsdam OVSeg（PQ/SQ/RQ + mIoU + mask AP）
+# xsam_eval_021_batch.sh 当前默认跑 DIOR-R OBB detection (test)
 _eval_target_data_names = [
-  # "vaihingen_panoptic_ovseg_val",
-   #"vaihingen_semantic_ovseg_val",
-   #"vaihingen_instance_ovseg_val",
-   #"vaihingen_detection_ovseg_val",
-    #"potsdam_genseg_pano_val",
-    
-    #"potsdam_semantic_ovseg_val",
+    #"dior_r_detection_ovseg_test",
+    # Potsdam OVSeg：类名替换为 pano 近义词（id 不变），单独输出到 *_panoalias
+    # "potsdam_panoptic_ovseg_val_panoalias",
     #"potsdam_panoptic_ovseg_val",
-    #"potsdam_instance_ovseg_val",
-    #"potsdam_detection_ovseg_val"
-    "panoptic_genseg_pano_val"
-    
-    
-    
+    # "potsdam_semantic_ovseg_val",
+    # "imgconv_FIT-RSFG_Benchmark_region_caption",
+    # "imgconv_FIT-RSFG_Benchmark_caption",
+    # "imgconv_RSVQA_HR",
+    #"vaihingen_panoptic_ovseg_val"
+    #"potsdam_semantic_ovseg_val",
+    #"potsdam_detection_ovseg_val",
+    #"vaihingen_semantic_ovseg_val",
+    #"vaihingen_detection_ovseg_val",
+    # FAST OVSeg (~60k images)
+    #"fast_panoptic_ovseg_val",
+    #"fast_semantic_ovseg_val",
+    #"fast_instance_ovseg_val",
+    #"fast_detection_ovseg_val",
+    # iSAID OVSeg (~34k im
+    # ages)
+    #"isaid_panoptic_ovseg_val",
+    #"isaid_semantic_ovseg_val",
+    #"isaid_instance_ovseg_val",
+    #"isaid_detection_ovseg_val",
+     # FloodNet OVSeg
+    #"floodnet_panoptic_ovseg_val",
+    #"floodnet_semantic_ovseg_val",
+    #"floodnet_instance_ovseg_val",
+    #"floodnet_detection_ovseg_val",
+    #"dior_r_detection_ovseg_test",
+    #"refseg_rrsisd_test",
+    #"reaseg_earthreason_test",
+    #"panoptic_ovseg_pano_val",
+    "rs_semantic_ovseg_val",
     #"imgconv_FIT-RSFG_Benchmark_VQA",
     #"imgconv_FIT-RSFG_Benchmark_scene_classification",
+    #"imgconv_FIT-RSFG_Benchmark_region_caption",
+    #"imgconv_FIT-RSFG_Benchmark_caption",
+    #"imgconv_FIT-RSRC",
+    #"imgconv_RSVQA_HR",
+    #"imgconv_RSVQA_LR",
     #"imgconv_FuSAR_caption",
-    #"imgconv_FuSAR_VQA",
     #"imgconv_SARLANG_caption",
+    #"imgconv_SARTEXT_caption",
+    #"imgconv_FSAR_caption",
+    #"imgconv_FuSAR_VQA",
+    #"imgconv_SAR-LANG_VQA"
     #"imgconv_SAR-LANG_VQA",
-    #"refseg_rrsisd_test"
     
 ]
 # _eval_target_data_names = ["reaseg_earthreason_test"]
@@ -2311,7 +2955,7 @@ train_cfg = dict(type=TrainLoop, max_epochs=max_epochs)
 #######################################################################
 # set visualizer
 visualizer = dict(
-    type=Visualizer,
+    type=EvalVisualizer,
     scale=1.0,
     font_size_scale=1.0,
 )

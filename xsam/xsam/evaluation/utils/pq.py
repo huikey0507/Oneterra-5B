@@ -17,6 +17,19 @@ OFFSET = 256 * 256 * 256
 VOID = 0
 
 
+def _resolve_panoptic_path(folder, file_name):
+    """Resolve panoptic PNG path; JSON may list .jpg while maps are .png (e.g. FloodNet)."""
+    path = os.path.join(folder, file_name)
+    if os.path.isfile(path):
+        return path
+    stem, _ = os.path.splitext(file_name)
+    for ext in (".png", ".jpg", ".jpeg"):
+        alt = os.path.join(folder, stem + ext)
+        if os.path.isfile(alt):
+            return alt
+    return path
+
+
 class PQStatCat:
     def __init__(self):
         self.iou = 0.0
@@ -81,9 +94,11 @@ def pq_compute_single_core(proc_id, annotation_set, gt_folder, pred_folder, cate
             print("Core: {}, {} from {} images processed".format(proc_id, idx, len(annotation_set)))
         idx += 1
 
-        pan_gt = np.array(Image.open(os.path.join(gt_folder, gt_ann["file_name"])), dtype=np.uint32)
+        pan_gt = np.array(Image.open(_resolve_panoptic_path(gt_folder, gt_ann["file_name"])), dtype=np.uint32)
         pan_gt = rgb2id(pan_gt)
-        pan_pred = np.array(Image.open(os.path.join(pred_folder, pred_ann["file_name"])), dtype=np.uint32)
+        pan_pred = np.array(
+            Image.open(_resolve_panoptic_path(pred_folder, pred_ann["file_name"])), dtype=np.uint32
+        )
         pan_pred = rgb2id(pan_pred)
 
         gt_segms = {el["id"]: el for el in gt_ann["segments_info"]}

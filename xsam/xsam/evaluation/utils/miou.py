@@ -46,8 +46,20 @@ def miou_compute_single_core(proc_id, annotation_set, gt_folder, pred_folder, ca
         idx += 1
 
         # Load ground truth and prediction images
-        gt_path = os.path.join(gt_folder, gt_ann["file_name"])
-        pred_path = os.path.join(pred_folder, pred_ann["file_name"])
+        # JSON may list .jpg while panoptic/sem maps are .png (e.g. FloodNet).
+        def _resolve(folder, file_name):
+            path = os.path.join(folder, file_name)
+            if os.path.isfile(path):
+                return path
+            stem, _ = os.path.splitext(file_name)
+            for ext in (".png", ".jpg", ".jpeg"):
+                alt = os.path.join(folder, stem + ext)
+                if os.path.isfile(alt):
+                    return alt
+            return path
+
+        gt_path = _resolve(gt_folder, gt_ann["file_name"])
+        pred_path = _resolve(pred_folder, pred_ann["file_name"])
 
         pan_gt = np.array(Image.open(gt_path), dtype=np.uint32)
         pan_gt = rgb2id(pan_gt)

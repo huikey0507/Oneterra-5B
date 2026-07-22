@@ -10,6 +10,13 @@ import matplotlib.colors as mplc
 import numpy as np
 import torch
 
+from xsam.structures import RotatedBoxes
+from xsam.utils.rbox_vis import (
+    is_rbox_detection,
+    pred_instances_to_rbox_for_draw,
+    rbox_instances_for_draw,
+)
+
 from .visualize import ColorMode, Visualizer, _OFF_WHITE, _is_instance_val_data_name, filter_instances_to_things
 
 
@@ -37,6 +44,17 @@ class EvalVisualizer(Visualizer):
     def draw_sem_seg(self, segmentation, area_threshold=None, alpha=0.8, **kwargs):
         if isinstance(segmentation, torch.Tensor):
             segmentation = segmentation.numpy()
+        # pred=contiguous 下标，GT=dataset_id；仅 pred 带 sampled_labels，做 contig→dataset_id
+        sampled_labels = kwargs.pop("sampled_labels", None)
+        if sampled_labels is not None:
+            if isinstance(sampled_labels, torch.Tensor):
+                sampled_labels = sampled_labels.tolist()
+            out = np.array(segmentation, copy=True)
+            for cid in np.unique(segmentation):
+                cid = int(cid)
+                if 0 <= cid < len(sampled_labels):
+                    out[segmentation == cid] = int(sampled_labels[cid])
+            segmentation = out
         labels, areas = np.unique(segmentation, return_counts=True)
         sorted_idxs = np.argsort(-areas).tolist()
         labels = labels[sorted_idxs]
@@ -70,18 +88,34 @@ class EvalVisualizer(Visualizer):
         if _is_instance_val_data_name(data_name):
             instances = filter_instances_to_things(instances, self.metadata)
         instances = instances.to(self.cpu_device)
-        boxes = instances.pred_boxes if instances.has("pred_boxes") else None
         scores = instances.scores if instances.has("scores") else None
         classes = instances.pred_classes.tolist() if instances.has("pred_classes") else None
         labels = _create_text_labels(classes, scores, self.metadata.get("thing_classes", None))
         keypoints = instances.pred_keypoints if instances.has("pred_keypoints") else None
 
-        draw_masks = not (data_name and "detection" in data_name)
-        if draw_masks and instances.has("pred_masks"):
-            masks = np.asarray(instances.pred_masks)
-            masks = [GenericMask(x, self.output.height, self.output.width) for x in masks]
-        else:
+        use_rbox = is_rbox_detection(data_name, self.metadata) and bool(
+            data_name and "detection" in data_name
+        )
+
+        if use_rbox:
+            if instances.has("pred_masks") and len(instances) > 0:
+                # pred：由 mask 拟合 OBB，角度已在 rbox_vis 中转为 CCW 度
+                boxes = pred_instances_to_rbox_for_draw(instances)
+            elif instances.has("pred_boxes") and isinstance(instances.pred_boxes, RotatedBoxes):
+                # GT：prepare_gt_data_detection 存的是 OpenCV 角，画之前取反
+                boxes = rbox_instances_for_draw(instances.pred_boxes)
+            else:
+                boxes = instances.pred_boxes if instances.has("pred_boxes") else None
             masks = None
+        else:
+            # 水平框 / instance：保持原有逻辑
+            boxes = instances.pred_boxes if instances.has("pred_boxes") else None
+            draw_masks = not (data_name and "detection" in data_name)
+            if draw_masks and instances.has("pred_masks"):
+                masks = np.asarray(instances.pred_masks)
+                masks = [GenericMask(x, self.output.height, self.output.width) for x in masks]
+            else:
+                masks = None
 
         if self._instance_mode == ColorMode.SEGMENTATION and self.metadata.get("thing_colors"):
             colors = (

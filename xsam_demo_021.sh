@@ -14,7 +14,9 @@ CONFIG="./xsam/xsam/configs/xsam/phi3_mini_4k_instruct_siglip2_so400m_p14_384/s3
 #CONFIG="/mnt_llm_A100_V1/shui/LAE/RS-Xsam-main-old/xsam/xsam/configs/xsam/phi3_mini_4k_instruct_siglip2_so400m_p14_384/s3_mixed_fineture_base/xsam_v3_ultimate_4xA40_eval.py"
 #CONFIG="/mnt_llm_A100_V1/shui/LAE/OneTerra-train/xsam/xsam/configs/xsam/phi3_mini_4k_instruct_siglip2_so400m_p14_384/s3_mixed_fineture_base/xsam_v3_finetune_v2_A100_64gpu.py"
 
-DEFAULT_PTH_MODEL="./checkpoints/s3_mixed_fineture_base/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_ovseg_subset_ft_flat_v1/iter_30000.pth"
+#DEFAULT_PTH_MODEL="/mnt_llm_A100_V1/shui/LAE/OneTerra-train/wkdrs_optimization_20260629_v3.1/iter_109000.pth"
+DEFAULT_PTH_MODEL="/mnt_llm_A100_V1/shui/iter_44000.pth"
+#DEFAULT_PTH_MODEL="./checkpoints/s3_mixed_fineture_base/xsam_phi3_mini_4k_instruct_siglip2_so400m_p14_384_sam_large_m2f_gpu16_ovseg_subset_ft_flat_v1/iter_30000.pth"
 #DEFAULT_PTH_MODEL="/mnt_llm_A100_V1/shui/LAE/OneTerra-train/wkdrs_optimization_20260611/iter_10000.pth"
 #DEFAULT_PTH_MODEL="/mnt_llm_A100_V1/yangsen/workspace/OneTerra-train-stage3/wkdrs_nanhu/s3_mixed_fineture_base/xsam_021_siglip2_so400m_p14_384_sam_large_m2f_mixed_finetune_all_nanhu_v1/pytorch_model.bin"
 #DEFAULT_PTH_MODEL="/mnt_llm_A100_V1/shui/LAE/OneTerra-train/wkdrs_v3_ultimate_4xA40/iter_31000.pth"
@@ -22,7 +24,7 @@ DEFAULT_PTH_MODEL="./checkpoints/s3_mixed_fineture_base/xsam_phi3_mini_4k_instru
 # 参数与 eval 对齐：$1 checkpoint，$2 work-dir（与 eval 的第二个参数含义相同，用于 vis/ 与 latest）
 PTH_MODEL="${1:-$DEFAULT_PTH_MODEL}"
 WORK_DIR="${2:-./demo_work_021}"
-PORT="${3:-7862}"
+PORT="${3:-7870}"
 HOST="${4:-0.0.0.0}"
 LOG_DIR="${5:-./demo_logs_021}"
 
