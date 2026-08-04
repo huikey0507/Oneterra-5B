@@ -116,29 +116,51 @@ class GenericSegEvaluator(BaseSegEvaluator):
         return json_list
 
     def semantic_process(self, inputs, outputs):
+        """Semantic mIoU：pred/GT 统一到 dataset contiguous（0..N-1）再进混淆矩阵。
+
+        - pred：后处理 argmax 为 prompt 下标；若有 sampled_labels，先映到 dataset_id 再映 contiguous。
+        - GT：seg_labels 约定为原始 category_id（可为空洞编号，如 pano 的 0=background）；
+          经 dataset_id_to_contiguous_id 映到 contiguous。未知 id / ignore_label → ignore 槽。
+        """
         gt_semseg_folder = osp.realpath(self._metadata.semseg_map_folder)
         semseg_sufix = self._metadata.semseg_sufix if hasattr(self._metadata, "semseg_sufix") else ".png"
         label_shift = self._metadata.label_shift if hasattr(self._metadata, "label_shift") else 0
+        d2c = {int(k): int(v) for k, v in (self._metadata.dataset_id_to_contiguous_id or {}).items()}
+        ignore_label = self._metadata.ignore_label
+
         for input, output in zip(inputs, outputs):
             segmentation = output["segmentation"].to(self._cpu_device)
-            sampled_labels = output["sampled_labels"]
-            pred = np.array(segmentation, dtype=int)
+            sampled_labels = output.get("sampled_labels", None)
+            pred = np.array(segmentation, dtype=np.int64)
 
+            # prompt-contiguous → global contiguous（勿把 dataset_id 直接当矩阵下标）
             if sampled_labels is not None:
-                unique_labels = np.unique(pred).tolist()
-                for unique_label in unique_labels:
-                    ul = int(unique_label)
+                if isinstance(sampled_labels, torch.Tensor):
+                    sampled_labels = sampled_labels.tolist()
+                remapped = np.full_like(pred, self._num_classes)
+                for ul in np.unique(pred).tolist():
+                    ul = int(ul)
                     if ul < 0 or ul >= len(sampled_labels):
                         continue
-                    pred[pred == ul] = sampled_labels[ul] - label_shift
+                    ds_id = int(sampled_labels[ul]) - label_shift
+                    cont_id = d2c.get(ds_id)
+                    if cont_id is not None:
+                        remapped[pred == ul] = cont_id
+                pred = remapped
 
             file_name = input["file_name"]
             file_name_semseg = os.path.splitext(file_name)[0] + semseg_sufix
-            gt = np.array(Image.open(os.path.join(gt_semseg_folder, file_name_semseg)), dtype=np.uint32)
-            gt[gt == self._metadata.ignore_label] = self._num_classes
+            gt = np.array(Image.open(os.path.join(gt_semseg_folder, file_name_semseg)), dtype=np.int64)
+
+            # dataset category_id（可空洞）→ contiguous；其余先置 ignore
+            gt_contig = np.full(gt.shape, self._num_classes, dtype=np.int64)
+            for ds_id, cont_id in d2c.items():
+                gt_contig[gt == ds_id] = cont_id
+            if ignore_label is not None:
+                gt_contig[gt == ignore_label] = self._num_classes
 
             self._conf_matrix += np.bincount(
-                (self._num_classes + 1) * pred.reshape(-1) + gt.reshape(-1),
+                (self._num_classes + 1) * pred.reshape(-1) + gt_contig.reshape(-1),
                 minlength=self._conf_matrix.size,
             ).reshape(self._conf_matrix.shape)
 

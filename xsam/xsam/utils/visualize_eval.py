@@ -44,9 +44,20 @@ class EvalVisualizer(Visualizer):
     def draw_sem_seg(self, segmentation, area_threshold=None, alpha=0.8, **kwargs):
         if isinstance(segmentation, torch.Tensor):
             segmentation = segmentation.numpy()
-        # pred=contiguous 下标，GT=dataset_id；仅 pred 带 sampled_labels，做 contig→dataset_id
+        # pred=contiguous 下标；GT=dataset category_id。
+        # 有 sampled_labels / metadata 时把 pred 映到 dataset_id，再查名字与调色板。
         sampled_labels = kwargs.pop("sampled_labels", None)
-        if sampled_labels is not None:
+        remap_pred_to_dataset_id = kwargs.pop("remap_pred_to_dataset_id", None)
+        if sampled_labels is None and remap_pred_to_dataset_id is None:
+            d2c = getattr(self.metadata, "dataset_id_to_contiguous_id", None) or {}
+            if d2c:
+                cont_to_ds = {int(v): int(k) for k, v in d2c.items()}
+                # 仅当像素值落在 contiguous 范围时自动反查（避免误伤已是 dataset_id 的 GT）
+                uniq = [int(x) for x in np.unique(segmentation)]
+                if uniq and max(uniq) < len(cont_to_ds) and all(u in cont_to_ds for u in uniq if u >= 0):
+                    remap_pred_to_dataset_id = True
+                    sampled_labels = [cont_to_ds[i] for i in range(len(cont_to_ds))]
+        if sampled_labels is not None and remap_pred_to_dataset_id is not False:
             if isinstance(sampled_labels, torch.Tensor):
                 sampled_labels = sampled_labels.tolist()
             out = np.array(segmentation, copy=True)

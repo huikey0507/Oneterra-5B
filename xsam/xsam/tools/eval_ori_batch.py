@@ -582,6 +582,15 @@ def evaluate_dataset(
                         seg_out_vis["segments_info"] = _panoptic_pred_segments_info_for_vis(
                             seg_out_vis["segments_info"], metadata
                         )
+                    # semantic：补上 sampled_labels，供 EvalVisualizer 做 contiguous→dataset_id 查名
+                    if "semantic" in data_name and seg_out_vis.get("sampled_labels") is None:
+                        if sampled_labels_batch is not None and i < len(sampled_labels_batch):
+                            seg_out_vis["sampled_labels"] = sampled_labels_batch[i]
+                        else:
+                            d2c = getattr(metadata, "dataset_id_to_contiguous_id", None) or {}
+                            if d2c:
+                                cont_to_ds = {int(v): int(k) for k, v in d2c.items()}
+                                seg_out_vis["sampled_labels"] = [cont_to_ds[j] for j in range(len(cont_to_ds))]
                     visualizer.draw_predictions(
                         image,
                         data_name=data_name,
@@ -611,12 +620,16 @@ def evaluate_dataset(
                 if gt is None:
                     continue
                 try:
+                    # GT semantic 像素已是 dataset category_id，禁止再按 contiguous 反查
+                    gt_vis_kwargs = dict(gt)
+                    if "semantic" in data_name:
+                        gt_vis_kwargs["remap_pred_to_dataset_id"] = False
                     visualizer.draw_predictions(
                         image,
                         data_name=data_name,
                         output_file=osp.join(vis_output_dir,  f"{osp.splitext(file_name)[0]}{sample_id}_gt.png"),
                         **image_info,
-                        **gt,
+                        **gt_vis_kwargs,
                     )
                 except Exception as e:
                     print_log(f"Error visualizing ground truth {file_name}: {e}\n{traceback.format_exc()}", logger="current")
