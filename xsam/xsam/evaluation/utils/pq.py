@@ -84,6 +84,15 @@ class PQStat:
         return {"pq": pq / n, "sq": sq / n, "rq": rq / n, "n": n}, per_class_results
 
 
+def _load_panoptic_id_map(path):
+    """Load panoptic PNG as segment-id map (handles palette / grayscale GT)."""
+    img = Image.open(path)
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    pan = np.array(img, dtype=np.uint32)
+    return rgb2id(pan)
+
+
 @get_traceback
 def pq_compute_single_core(proc_id, annotation_set, gt_folder, pred_folder, categories):
     pq_stat = PQStat()
@@ -94,12 +103,8 @@ def pq_compute_single_core(proc_id, annotation_set, gt_folder, pred_folder, cate
             print("Core: {}, {} from {} images processed".format(proc_id, idx, len(annotation_set)))
         idx += 1
 
-        pan_gt = np.array(Image.open(_resolve_panoptic_path(gt_folder, gt_ann["file_name"])), dtype=np.uint32)
-        pan_gt = rgb2id(pan_gt)
-        pan_pred = np.array(
-            Image.open(_resolve_panoptic_path(pred_folder, pred_ann["file_name"])), dtype=np.uint32
-        )
-        pan_pred = rgb2id(pan_pred)
+        pan_gt = _load_panoptic_id_map(_resolve_panoptic_path(gt_folder, gt_ann["file_name"]))
+        pan_pred = _load_panoptic_id_map(_resolve_panoptic_path(pred_folder, pred_ann["file_name"]))
 
         gt_segms = {el["id"]: el for el in gt_ann["segments_info"]}
         pred_segms = {el["id"]: el for el in pred_ann["segments_info"]}

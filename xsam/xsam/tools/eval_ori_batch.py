@@ -88,6 +88,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="path to model checkpoint for evaluation",
     )
+    parser.add_argument(
+        "--prev-pth-model",
+        type=str,
+        default=None,
+        help="optional earlier SAR-align delta ckpt (e.g. Stage A) loaded before --pth_model",
+    )
     parser.add_argument("--seed", type=int, default=None, help="random seed")
     parser.add_argument(
         "--cfg-options",
@@ -103,6 +109,12 @@ def parse_args() -> argparse.Namespace:
         help="skip saving pred/gt visualization PNGs (much faster)",
     )
     parser.add_argument(
+        "--pred-name-suffix",
+        type=str,
+        default="",
+        help="append to pred_data/<data_name> folder, e.g. _auto / _sar / _optical",
+    )
+    parser.add_argument(
         "--launcher",
         choices=["none", "pytorch", "slurm", "mpi"],
         default="none",
@@ -110,6 +122,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--local_rank", "--local-rank", type=int, default=0)
     return parser.parse_args()
+
+
+def resolve_checkpoint_path(pth_model: str) -> str:
+    """Resolve DeepSpeed iter_*.pth directory to mp_rank_00_model_states.pt."""
+    if pth_model and osp.isdir(pth_model):
+        model_states_file = osp.join(pth_model, "mp_rank_00_model_states.pt")
+        pytorch_model_file = osp.join(pth_model, "pytorch_model.bin")
+        if osp.exists(model_states_file):
+            return model_states_file
+        if osp.exists(pytorch_model_file):
+            return pytorch_model_file
+    return pth_model
 
 
 def get_gcg_phrases(input_ids, tokenizer, pstart_token_idx, pend_token_idx):
@@ -479,7 +503,7 @@ def prepare_gt_data(mask_gt, class_gt, segmentation_output, metadata, data_name,
 
 
 def resolve_eval_batch_size(data_name: str, dataset, requested: int) -> Tuple[int, bool]:
-    """refseg/reaseg 在模型里会把 batch 内条件拼成多类，后处理要求 num_labels==1，仅支持 batch_size=1。"""
+    """refseg/reaseg/imgconv 仅支持 batch_size=1（imgconv 多 batch 缺 attention_mask 会崩）。"""
     task_name = getattr(dataset, "task_name", None)
     force_bs1_tasks = {"refseg", "reaseg", "imgconv"}
     if task_name in force_bs1_tasks or any(t in data_name for t in ("refseg", "reaseg", "imgconv")):
@@ -685,6 +709,11 @@ def main():
             args.pth_model = find_latest_checkpoint(args.work_dir)
         print_log(f"Found latest checkpoint: {args.pth_model}", logger="current")
 
+    if args.prev_pth_model:
+        args.prev_pth_model = resolve_checkpoint_path(args.prev_pth_model)
+    if args.pth_model:
+        args.pth_model = resolve_checkpoint_path(args.pth_model)
+
     # Build and setup model
     model = BUILDER.build(cfg.model)
     if "llm" in cfg.model:
@@ -695,6 +724,9 @@ def main():
     if world_size > 1:
         print_log(f"Model on {device}, distributed eval with {world_size} GPUs", logger="current")
 
+    if args.prev_pth_model:
+        print_log(f"Loading previous SAR-align checkpoint: {args.prev_pth_model}", logger="current")
+        load_checkpoint(model, args.prev_pth_model)
     load_checkpoint(model, args.pth_model)
     stop_criteria, generation_config = setup_model_config(model, cfg)
 
@@ -733,7 +765,8 @@ def main():
 
             evaluator = BUILDER.build(evaluator_cfg)
             evaluator.metadata = dataset.metadata
-            evaluator.output_dir = osp.join(args.work_dir, "pred_data", evaluator.data_name)
+            pred_dir_name = f"{evaluator.data_name}{args.pred_name_suffix or ''}"
+            evaluator.output_dir = osp.join(args.work_dir, "pred_data", pred_dir_name)
             evaluator._distributed = world_size > 1
             evaluate_dataset(
                 model,
