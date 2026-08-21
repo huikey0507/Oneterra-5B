@@ -876,12 +876,12 @@ val_datasets = [
         max_length=max_length,
         pad_image_to_square=True,
     ),
-    # 2a. Pano OVSeg — semantic (mIoU; GT from panoptic→class-id remap in val/seg_labels)
+    # 2a. Pano OVSeg — semantic (mIoU; GT is class-id maps in val/segment_labels)
     dict(
         type=OVSegDataset,
         data_path=pano_data_root + "annotations_val.json",
         image_folder=pano_data_root + "val/images",
-        semseg_map_folder=pano_data_root + "val/seg_labels",
+        semseg_map_folder=pano_data_root + "val/segment_labels",
         ignore_label=0,
         data_mode="eval",
         tokenizer=tokenizer,
@@ -2988,7 +2988,7 @@ _eval_target_data_names = [
     #"refseg_rrsisd_test",
     #"reaseg_earthreason_test",
     #"panoptic_ovseg_pano_val",
-    #"rs_semantic_ovseg_val",
+    "rs_semantic_ovseg_val",
     
     #"imgconv_FIT-RSFG_Benchmark_scene_classification",
     #"imgconv_FIT-RSFG_Benchmark_region_caption",
@@ -2998,7 +2998,7 @@ _eval_target_data_names = [
     #"imgconv_RSVQA_LR",
     #"imgconv_FuSAR_caption",
     #"imgconv_SARLANG_caption",
-    "sar_panoptic_ovseg_val",
+    #"sar_panoptic_ovseg_val",
 ]
 # _eval_target_data_names = ["reaseg_earthreason_test"]
 # _eval_target_data_names = ["panoptic_ovseg_pano_val"]

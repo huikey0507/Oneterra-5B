@@ -51,6 +51,9 @@ class GenericSegDataset(BaseDataset):
     def custom_init(self, **kwargs):
         self.use_variant_cat = kwargs.get("use_variant_cat", False)
         self.use_full_cat = kwargs.get("use_full_cat", True)
+        # Eval-only: prompt with image-wise GT (positive) categories; no distractors.
+        # Default False keeps full-catalog eval unchanged.
+        self.eval_pos_cat_only = kwargs.get("eval_pos_cat_only", False)
         self.caption_data_path = kwargs.get("caption_data_path", None)
         self.panseg_map_folder = kwargs.get("panseg_map_folder", None)
         self.semseg_map_folder = kwargs.get("semseg_map_folder", None)
@@ -198,7 +201,11 @@ class GenericSegDataset(BaseDataset):
                 sampled_cat_ids = _sample(pos_cat_ids, self.sample_num)
                 sampled_anns = [anns[ann_cat_ids.index(cat_id)] for cat_id in sampled_cat_ids]
         else:
-            sampled_cat_ids = cat_ids
+            # Eval: full catalog by default; optional GT-positive-only prompt (reproducible, no RNG).
+            if getattr(self, "eval_pos_cat_only", False):
+                sampled_cat_ids = list(pos_cat_ids)
+            else:
+                sampled_cat_ids = cat_ids
 
         for ann in sampled_anns:
             ann["category_id"] = sampled_cat_ids.index(ann["category_id"])

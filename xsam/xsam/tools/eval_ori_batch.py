@@ -216,6 +216,7 @@ def process_batch(
         llm_question_input = model.tokenizer.decode(_input_ids[_input_ids > 0])
 
     data_dict = data_dict_to_device(data_dict, device=model.device, dtype=model.dtype)
+    sampled_labels = getattr(data_samples, "sampled_labels", None)
     with torch.no_grad():
         llm_outputs, seg_outputs = model(
             data_dict,
@@ -224,6 +225,7 @@ def process_batch(
             generation_config=generation_config,
             stopping_criteria=stop_criteria,
             metadata=metadata,
+            sampled_labels=sampled_labels,
             do_postprocess=True,
             do_loss=False,
         )

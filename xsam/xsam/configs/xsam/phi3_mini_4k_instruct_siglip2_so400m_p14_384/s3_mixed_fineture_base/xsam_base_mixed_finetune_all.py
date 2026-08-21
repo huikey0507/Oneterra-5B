@@ -839,12 +839,47 @@ val_datasets = [
         pad_image_to_square=True,
         #max_eval_samples=50,
     ),
-    # 2a. Pano OVSeg — semantic (mIoU; GT from panoptic→class-id remap in val/seg_labels)
+    # 2-pos. Pano OVSeg — GT-positive classes only (oracle / no distractors; reproducible)
     dict(
         type=OVSegDataset,
         data_path=pano_data_root + "annotations_val.json",
         image_folder=pano_data_root + "val/images",
-        semseg_map_folder=pano_data_root + "val/seg_labels",
+        panseg_map_folder=pano_data_root + "val/panoptic_labels",
+        data_mode="eval",
+        tokenizer=tokenizer,
+        task_name="ovseg",
+        data_name="panoptic_ovseg_pano_val_pos",
+        output_ids_with_output=output_ids_with_output,
+        cond_type=cond_type,
+        special_tokens=special_tokens,
+        image_processor=image_processor,
+        extra_image_processor=extra_image_processor,
+        eval_pos_cat_only=True,
+        dataset_map_fn=dict(
+            type=dataset_map_fn_factory,
+            fn=ov_seg_map_fn,
+            cond_type=cond_type,
+        ),
+        postprocess_fn=dict(
+            type=process_map_fn_factory,
+            fn=ov_seg_postprocess_fn,
+            task_name="panoptic_ovseg",
+            threshold=0.0,
+        ),
+        template_map_fn=dict(
+            type=template_map_fn_factory,
+            template=prompt_template,
+            output_suffix=output_ids_with_output,
+        ),
+        max_length=max_length,
+        pad_image_to_square=True,
+    ),
+    # 2a. Pano OVSeg — semantic (mIoU; GT is class-id maps in val/segment_labels)
+    dict(
+        type=OVSegDataset,
+        data_path=pano_data_root + "annotations_val.json",
+        image_folder=pano_data_root + "val/images",
+        semseg_map_folder=pano_data_root + "val/segment_labels",
         ignore_label=0,
         data_mode="eval",
         tokenizer=tokenizer,
@@ -2494,6 +2529,13 @@ val_evaluators = [
         data_name="panoptic_ovseg_pano_val",
         distributed=True,
     ),
+    # 2-pos. Pano OVSeg with image-wise GT-positive prompt only
+    dict(
+        type=OVSegEvaluator,
+        data_name="panoptic_ovseg_pano_val_pos",
+        distributed=True,
+        show_categories=True,
+    ),
     dict(
         type=OVSegEvaluator,
         data_name="rs_semantic_ovseg_val",
@@ -2875,7 +2917,8 @@ _eval_target_data_names = [
     #"refseg_rrsisd_test",
     #"reaseg_earthreason_test",
     #"panoptic_ovseg_pano_val",
-    "rs_semantic_ovseg_val",
+    "panoptic_ovseg_pano_val_pos",
+    #"rs_semantic_ovseg_val",
     #"imgconv_FIT-RSFG_Benchmark_VQA",
     #"imgconv_FIT-RSFG_Benchmark_scene_classification",
     #"imgconv_FIT-RSFG_Benchmark_region_caption",

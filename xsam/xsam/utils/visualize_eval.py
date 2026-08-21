@@ -44,36 +44,45 @@ class EvalVisualizer(Visualizer):
     def draw_sem_seg(self, segmentation, area_threshold=None, alpha=0.8, **kwargs):
         if isinstance(segmentation, torch.Tensor):
             segmentation = segmentation.numpy()
-        # pred=contiguous 下标；GT=dataset category_id。
-        # 有 sampled_labels / metadata 时把 pred 映到 dataset_id，再查名字与调色板。
+        # pred=prompt/contiguous 下标；GT=dataset category_id。
+        # pano 类 id 有空洞（如 26=ship, contiguous 26=bridge），不能把下标当 dataset_id 查名。
         sampled_labels = kwargs.pop("sampled_labels", None)
         remap_pred_to_dataset_id = kwargs.pop("remap_pred_to_dataset_id", None)
-        if sampled_labels is None and remap_pred_to_dataset_id is None:
-            d2c = getattr(self.metadata, "dataset_id_to_contiguous_id", None) or {}
-            if d2c:
-                cont_to_ds = {int(v): int(k) for k, v in d2c.items()}
-                # 仅当像素值落在 contiguous 范围时自动反查（避免误伤已是 dataset_id 的 GT）
-                uniq = [int(x) for x in np.unique(segmentation)]
-                if uniq and max(uniq) < len(cont_to_ds) and all(u in cont_to_ds for u in uniq if u >= 0):
-                    remap_pred_to_dataset_id = True
-                    sampled_labels = [cont_to_ds[i] for i in range(len(cont_to_ds))]
-        if sampled_labels is not None and remap_pred_to_dataset_id is not False:
-            if isinstance(sampled_labels, torch.Tensor):
-                sampled_labels = sampled_labels.tolist()
-            out = np.array(segmentation, copy=True)
-            for cid in np.unique(segmentation):
-                cid = int(cid)
-                if 0 <= cid < len(sampled_labels):
-                    out[segmentation == cid] = int(sampled_labels[cid])
-            segmentation = out
+        ignore_label = getattr(self.metadata, "ignore_label", None)
+        d2c = {int(k): int(v) for k, v in (getattr(self.metadata, "dataset_id_to_contiguous_id", None) or {}).items()}
+        cont_to_ds = {int(v): int(k) for k, v in d2c.items()} if d2c else {}
+
+        if remap_pred_to_dataset_id is not False and cont_to_ds:
+            uniq = [int(x) for x in np.unique(segmentation) if int(x) >= 0]
+            looks_contiguous = bool(uniq) and all(u in cont_to_ds for u in uniq)
+            lut = None
+            if sampled_labels is not None:
+                if isinstance(sampled_labels, torch.Tensor):
+                    sampled_labels = sampled_labels.tolist()
+                sl = [int(x) for x in sampled_labels]
+                # 0..n-1 连续下标不是 dataset id（pano 有空洞）；全表评测改走 metadata 反查。
+                if sl and sl != list(range(len(sl))):
+                    lut = sl
+            if lut is None and looks_contiguous:
+                lut = [cont_to_ds[i] for i in range(len(cont_to_ds))]
+            if lut is not None:
+                out = np.array(segmentation, copy=True)
+                for cid in uniq:
+                    if 0 <= cid < len(lut):
+                        out[segmentation == cid] = int(lut[cid])
+                segmentation = out
+
         labels, areas = np.unique(segmentation, return_counts=True)
         sorted_idxs = np.argsort(-areas).tolist()
         labels = labels[sorted_idxs]
         stuff_palette = getattr(self.metadata, "stuff_colors", None) or getattr(
             self.metadata, "dataset_colors", None
         )
+        skip_ids = {-1, 255}
+        if ignore_label is not None:
+            skip_ids.add(int(ignore_label))
         for label in labels:
-            if label < 0:
+            if int(label) in skip_ids:
                 continue
             pal_id = self._contiguous_id_for_palette(int(label))
             try:

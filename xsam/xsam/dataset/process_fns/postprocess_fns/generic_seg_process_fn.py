@@ -181,6 +181,29 @@ def generic_seg_postprocess_fn(
             )
         return results
 
+    def _remap_prompt_labels_to_contiguous(pred_labels, sampled_label, metadata):
+        """Map prompt-local class indices to dataset contiguous ids via sampled_labels.
+
+        For full-catalog eval this is identity. For eval_pos_cat_only prompts it is required
+        so PQ / stuff fusion still use global contiguous indices.
+        """
+        if sampled_label is None or metadata is None:
+            return pred_labels
+        d2c = getattr(metadata, "dataset_id_to_contiguous_id", None) or {}
+        if not d2c:
+            return pred_labels
+        if isinstance(sampled_label, torch.Tensor):
+            sampled_label = sampled_label.tolist()
+        mapped = []
+        for lab in pred_labels.tolist():
+            lab = int(lab)
+            if lab < 0 or lab >= len(sampled_label):
+                mapped.append(lab)
+                continue
+            ds_id = int(sampled_label[lab])
+            mapped.append(int(d2c.get(ds_id, lab)))
+        return torch.tensor(mapped, device=pred_labels.device, dtype=pred_labels.dtype)
+
     def _panoptic_genseg_postprocess(
         outputs,
         image_sizes,
@@ -262,6 +285,8 @@ def generic_seg_postprocess_fn(
         # [batch_size, num_queries, height, width]
         masks_queries_logits = outputs.masks_queries_logits
         scaled_sizes = scaled_sizes if scaled_sizes is not None else image_sizes
+        metadata = kwargs.get("metadata", None)
+        sampled_labels = kwargs.get("sampled_labels", None)
 
         batch_size = class_queries_logits.shape[0]
         num_labels = class_queries_logits.shape[-1] - 1
@@ -275,7 +300,7 @@ def generic_seg_postprocess_fn(
             image_size = image_sizes[i]
             scaled_size = scaled_sizes[i]
 
-            _debug_ovseg_confusion(mask_cls, kwargs.get("task_name", ""), kwargs.get("metadata", None))
+            _debug_ovseg_confusion(mask_cls, kwargs.get("task_name", ""), metadata)
 
             mask_pred = sem_seg_postprocess(mask_pred, scaled_size, image_size[0], image_size[1])
 
@@ -296,6 +321,13 @@ def generic_seg_postprocess_fn(
                 results.append({"segmentation": segmentation, "segments_info": []})
                 continue
 
+            sampled_label_i = None
+            if sampled_labels is not None and i < len(sampled_labels):
+                sampled_label_i = sampled_labels[i]
+            pred_labels_item = _remap_prompt_labels_to_contiguous(
+                pred_labels_item, sampled_label_i, metadata
+            )
+
             # Get segmentation map and segment information of batch item
             target_size = image_size if image_sizes is not None else None
             segmentation, segments_info = compute_segments(
@@ -308,12 +340,18 @@ def generic_seg_postprocess_fn(
                 target_size=target_size,
             )
 
-            results.append({"segmentation": segmentation, "segments_info": segments_info})
+            results.append(
+                {
+                    "segmentation": segmentation,
+                    "segments_info": segments_info,
+                    "sampled_labels": sampled_label_i,
+                }
+            )
 
         return results
 
     if "pan" in task_name:
-        metadata = kwargs.pop("metadata", None)
+        metadata = kwargs.get("metadata", None)
         label_ids_to_fuse = None
         if metadata is not None and hasattr(metadata, "stuff_dataset_id_to_contiguous_id"):
             label_ids_to_fuse = metadata.stuff_dataset_id_to_contiguous_id.values()

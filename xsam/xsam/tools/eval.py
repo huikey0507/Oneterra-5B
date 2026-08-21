@@ -279,6 +279,7 @@ def process_batch(
     data_dict = data_dict_to_device(data_dict, device=model.device, dtype=model.dtype)
 
     llm_generation_output = ""
+    sampled_labels = getattr(data_samples, "sampled_labels", None)
     with torch.no_grad():
         llm_outputs, seg_outputs = model(
             data_dict,
@@ -287,6 +288,7 @@ def process_batch(
             generation_config=generation_config,
             stopping_criteria=stop_criteria,
             metadata=metadata,
+            sampled_labels=sampled_labels,
             do_postprocess=True,
             do_loss=False,
         )
