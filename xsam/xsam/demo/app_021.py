@@ -177,13 +177,14 @@ custom_css = """
 
 TASK_DESCRIPTION = {
     "imgconv": "根据图像回答自然语言问题。",
-    "genseg": "全景分割（genseg）：与 xsam_predict_genseg_pano_021.sh 相同通路，固定使用 assets/annotations_val.json 全量 pano 类别（tensor）；界面提示词仅作展示，可留空。",
-    "ovseg": "开集全景（ovseg）：由用户在提示中自行定义类别；推荐 thing: 实例类; stuff: 背景类，逗号分隔时全部按 stuff 处理。",
+    "ovseg": "开放词汇全景分割（ovseg）：由用户在提示中自行定义类别；推荐 thing: 实例类; stuff: 背景类，逗号分隔时全部按 stuff 处理。",
     "refseg": "指代表达分割：用自然语言描述目标物体。",
     "reaseg": "推理分割：根据推理类问题定位并分割相关区域。",
 }
 
 SUPPORTED_TASKS = list(TASK_DESCRIPTION.keys())
+DEFAULT_SCORE_THRESHOLD = 0.0
+DEFAULT_MASK_THRESHOLD = 0.5
 
 # Examples with proper image paths
 EXAMPLES = {
@@ -195,11 +196,6 @@ EXAMPLES = {
         ),
         "Can you describe this image briefly? Please elaborate on your response.",
         "imgconv",
-    ],
-    "genseg": [
-        (osp.join(this_dir, "./images/genseg.jpg") if osp.exists(osp.join(this_dir, "./images/genseg.jpg")) else None),
-        "__DEFAULT_GENSEG_PROMPT__",
-        "genseg",
     ],
     "ovseg": [
         (osp.join(this_dir, "./images/genseg.jpg") if osp.exists(osp.join(this_dir, "./images/genseg.jpg")) else None),
@@ -217,6 +213,69 @@ EXAMPLES = {
         "reaseg",
     ],
 }
+
+
+def _task_threshold_ui(task_name: str):
+    """Return task-specific slider states for score/mask thresholds."""
+    if task_name == "ovseg":
+        return (
+            gr.update(
+                value=DEFAULT_SCORE_THRESHOLD,
+                minimum=0.0,
+                maximum=1.0,
+                step=0.01,
+                interactive=True,
+                visible=True,
+                label="候选保留阈值 score_threshold（ovseg）",
+                info="筛选进入全景合成的 query；越大越保守，默认 0.0。",
+            ),
+            gr.update(
+                value=DEFAULT_MASK_THRESHOLD,
+                minimum=0.0,
+                maximum=1.0,
+                step=0.01,
+                interactive=True,
+                visible=True,
+                label="边界阈值 mask_threshold（ovseg/refseg/reaseg）",
+                info="决定 mask 前景边界；越大边界越收缩，默认 0.5。",
+            ),
+        )
+    if task_name in ("refseg", "reaseg"):
+        return (
+            gr.update(
+                value=DEFAULT_SCORE_THRESHOLD,
+                interactive=False,
+                visible=False,
+                label="候选保留阈值 score_threshold（仅 ovseg）",
+                info="refseg / reaseg 不使用该阈值。",
+            ),
+            gr.update(
+                value=DEFAULT_MASK_THRESHOLD,
+                minimum=0.0,
+                maximum=1.0,
+                step=0.01,
+                interactive=True,
+                visible=True,
+                label="边界阈值 mask_threshold（ovseg/refseg/reaseg）",
+                info="决定单目标 mask 的前景边界；越大越保守，默认 0.5。",
+            ),
+        )
+    return (
+        gr.update(
+            value=DEFAULT_SCORE_THRESHOLD,
+            interactive=False,
+            visible=False,
+            label="候选保留阈值 score_threshold（仅 ovseg）",
+            info="当前任务不使用该阈值。",
+        ),
+        gr.update(
+            value=DEFAULT_MASK_THRESHOLD,
+            interactive=False,
+            visible=False,
+            label="边界阈值 mask_threshold（ovseg/refseg/reaseg）",
+            info="当前任务不使用该阈值。",
+        ),
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -252,14 +311,21 @@ def parse_args() -> argparse.Namespace:
 
 
 class GradioApp:
-    def __init__(self, demo: XSamDemo, log_dir: str, work_dir: str, default_genseg_prompt: str):
+    def __init__(self, demo: XSamDemo, log_dir: str, work_dir: str):
         self.demo = demo
         self.log_dir = log_dir
         self.work_dir = work_dir
-        self.default_genseg_prompt = default_genseg_prompt or ""
         self.processing_status = "Ready"
 
-    def gradio_predict_with_progress(self, data, prompt, task_name="imgconv", score_thr=0.5, progress=gr.Progress()):
+    def gradio_predict_with_progress(
+        self,
+        data,
+        prompt,
+        task_name="imgconv",
+        score_thr=DEFAULT_SCORE_THRESHOLD,
+        mask_thr=DEFAULT_MASK_THRESHOLD,
+        progress=gr.Progress(),
+    ):
         """Enhanced prediction function with progress tracking and better error handling"""
         if data is None:
             return "未提供图像", "", "", None
@@ -268,10 +334,8 @@ class GradioApp:
             print_log(f"[Gradio] 收到请求 task={task_name}", logger="current")
             progress(0.1, desc="初始化…")
 
-            # Validate inputs（genseg 允许空提示词，与评测一致表示全类别）
             if not prompt or prompt.strip() == "":
-                if task_name != "genseg":
-                    return "当前任务需要输入提示词", "", "", None
+                return "当前任务需要输入提示词", "", "", None
 
             # Logging setup
             day_timestamp = datetime.datetime.now().strftime("%Y%m%d")
@@ -310,10 +374,18 @@ class GradioApp:
             # Run prediction using custom logic
             start_time = time.time()
 
-            # genseg/ovseg 与 eval 一致用 threshold=0；过高会滤掉全部 mask，可视化只剩原图
-            seg_threshold = 0.0 if task_name in ("genseg", "ovseg") else score_thr
+            run_kwargs = {"vprompt_masks": vprompt_masks}
+            if task_name == "ovseg":
+                run_kwargs["threshold"] = float(score_thr)
+                run_kwargs["mask_threshold"] = float(mask_thr)
+            elif task_name in ("refseg", "reaseg"):
+                run_kwargs["mask_threshold"] = float(mask_thr)
+
             llm_input, llm_output, seg_output = self.demo.run_on_image(
-                pil_image, prompt, task_name, vprompt_masks=vprompt_masks, threshold=seg_threshold
+                pil_image,
+                prompt,
+                task_name,
+                **run_kwargs,
             )
 
             llm_success = llm_output is not None
@@ -367,7 +439,7 @@ class GradioApp:
                 """
                 <div class="main-header">
                     <h1>遥感基础模型OneTerra</h1>
-                    <h2>支持光学和SAR双模态，在统一框架下支持图像对话与问答理解（imgconv）、闭集全景/语义分割（genseg）、开放词汇分割（ovseg）、指代分割（refseg）与推理分割（reaseg），实现图像级语义理解、实例级目标识别、像素级精细分割与语言驱动可控推理的一体化解译能力</h2>
+                    <h2>支持光学和SAR双模态，在统一框架下支持图像对话与问答理解（imgconv）、开放词汇全景分割（ovseg）、指代分割（refseg）与推理分割（reaseg），实现图像级语义理解、实例级目标识别、像素级精细分割与语言驱动可控推理的一体化解译能力</h2>
                 </div>
             """
             )
@@ -405,17 +477,30 @@ class GradioApp:
                         score_thr = gr.Slider(
                             minimum=0,
                             maximum=1,
-                            value=0.0,
+                            value=DEFAULT_SCORE_THRESHOLD,
                             step=0.01,
-                            interactive=True,
-                            label="分数阈值（imgconv 无效；genseg/ovseg 固定为 0；refseg/reaseg 用后处理阈值）",
+                            interactive=False,
+                            visible=False,
+                            label="候选保留阈值 score_threshold（仅 ovseg）",
+                            info="当前任务不使用该阈值。",
+                            elem_classes="score-threshold",
+                        )
+                        mask_thr = gr.Slider(
+                            minimum=0,
+                            maximum=1,
+                            value=DEFAULT_MASK_THRESHOLD,
+                            step=0.01,
+                            interactive=False,
+                            visible=False,
+                            label="边界阈值 mask_threshold（ovseg/refseg/reaseg）",
+                            info="当前任务不使用该阈值。",
                             elem_classes="score-threshold",
                         )
 
                         text_input = gr.Textbox(
                             lines=2,
                             label="用户提示词",
-                            placeholder="imgconv/ovseg/refseg/reaseg 需填写；genseg 可留空（全 pano 类别）或使用 ins:/sem:。",
+                            placeholder="imgconv/ovseg/refseg/reaseg 需填写提示词。",
                             value="",
                             elem_id="user-prompt-input",
                             elem_classes="prompt-input",
@@ -468,7 +553,7 @@ class GradioApp:
             # Event handlers
             submit_btn.click(
                 fn=self.gradio_predict_with_progress,
-                inputs=[image_input, text_input, task_name, score_thr],
+                inputs=[image_input, text_input, task_name, score_thr, mask_thr],
                 outputs=[status_display, llm_input, llm_output, seg_output],
                 show_progress=True,
             )
@@ -478,35 +563,51 @@ class GradioApp:
                     None,
                     "",
                     "imgconv",
+                    TASK_DESCRIPTION["imgconv"],
                     "",
-                    None,
+                    "",
                     gr.update(value=None),
-                    0.5,
+                    gr.update(
+                        value=DEFAULT_SCORE_THRESHOLD,
+                        interactive=False,
+                        visible=False,
+                        label="候选保留阈值 score_threshold（仅 ovseg）",
+                        info="当前任务不使用该阈值。",
+                    ),
+                    gr.update(
+                        value=DEFAULT_MASK_THRESHOLD,
+                        interactive=False,
+                        visible=False,
+                        label="边界阈值 mask_threshold（ovseg/refseg/reaseg）",
+                        info="当前任务不使用该阈值。",
+                    ),
                     "🧹 已清空，可重新上传图像。",
                 ],
                 outputs=[
                     image_input,
                     text_input,
                     task_name,
+                    task_description,
                     llm_input,
                     llm_output,
                     seg_output,
                     score_thr,
+                    mask_thr,
                     status_display,
                 ],
             )
 
             suggestions_btn.click(fn=self.get_examples, inputs=[task_name], outputs=[image_input, text_input])
 
-            def _on_task_change(task, cur_prompt):
-                desc = TASK_DESCRIPTION.get(task, "")
-                if task == "genseg" and self.default_genseg_prompt and (
-                    cur_prompt is None or str(cur_prompt).strip() == ""
-                ):
-                    return desc, self.default_genseg_prompt
-                return desc, gr.update()
+            def _on_task_change(task, _cur_prompt):
+                score_update, mask_update = _task_threshold_ui(task)
+                return TASK_DESCRIPTION.get(task, ""), gr.update(), score_update, mask_update
 
-            task_name.change(fn=_on_task_change, inputs=[task_name, text_input], outputs=[task_description, text_input])
+            task_name.change(
+                fn=_on_task_change,
+                inputs=[task_name, text_input],
+                outputs=[task_description, text_input, score_thr, mask_thr],
+            )
 
             # Auto-update status when image is uploaded
             image_input.change(
@@ -529,8 +630,6 @@ class GradioApp:
         try:
             image_path = example[0]
             text_prompt = example[1]
-            if text_prompt == "__DEFAULT_GENSEG_PROMPT__":
-                text_prompt = self.default_genseg_prompt
 
             # Load image if path exists
             if image_path and osp.exists(image_path):
@@ -596,8 +695,7 @@ def main():
     demo = XSamDemo(cfg, args.pth_model, output_ids_with_output=False)
     print_log("Model loaded.", logger="current")
 
-    default_genseg = demo.default_genseg_prompt()
-    gradio_app = GradioApp(demo, args.log_dir, args.work_dir, default_genseg)
+    gradio_app = GradioApp(demo, args.log_dir, args.work_dir)
     app = gradio_app.create_interface()
 
     print_log(f"Gradio: http://{args.host}:{args.port}", logger="current")

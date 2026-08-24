@@ -729,6 +729,8 @@ class Visualizer:
             raise ValueError(f"Unsupported task: {data_name}")
 
     def draw_ov_seg(self, data_name, **kwargs):
+        # ovseg 全景：thing 额外画最小外接旋转框，stuff 仍只画 mask
+        kwargs.setdefault("draw_thing_rbox", True)
         return self.draw_gen_seg(data_name, **kwargs)
 
     def draw_pan_seg(self, segmentation, segments_info, area_threshold=None, alpha=0.3, **kwargs):
@@ -743,10 +745,15 @@ class Visualizer:
                 If None, category id of each pixel is computed by
                 ``pixel // metadata.label_divisor``.
             area_threshold (int): stuff segments with less than `area_threshold` are not drawn.
+            draw_thing_rbox (bool): if True, overlay min-area rotated boxes on thing instances.
 
         Returns:
             output (VisImage): image object with visualizations.
         """
+        draw_thing_rbox = bool(kwargs.pop("draw_thing_rbox", False))
+        mask_to_rbox_for_draw = None
+        if draw_thing_rbox:
+            from .rbox_vis import mask_to_rbox_for_draw
         pred = _PanopticPrediction(segmentation, segments_info, self.metadata)
 
         if self._instance_mode == ColorMode.IMAGE_BW:
@@ -844,6 +851,16 @@ class Visualizer:
                 alpha=alpha,
                 area_threshold=0,
             )
+            if draw_thing_rbox and mask_to_rbox_for_draw is not None:
+                rbox = mask_to_rbox_for_draw(binary_mask)
+                if rbox is not None:
+                    self.draw_rotated_box_with_label(
+                        rbox,
+                        alpha=0.95,
+                        edge_color=instance_color,
+                        line_style="-",
+                        label=None,
+                    )
 
         return self.output
 

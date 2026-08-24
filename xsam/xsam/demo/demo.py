@@ -1088,9 +1088,11 @@ class XSamDemo:
         data_dict, data_samples = self._process_input_dict(data_dict)
         input_ids = data_dict["input_ids"]
 
-        if self._uses_tensor_infer(task_name):
-            # 与 eval / predict_genseg_pano 一致；demo 默认 score_thr=0.5 会滤掉全部 mask 导致只见原图
-            kwargs["threshold"] = 0.0
+        if task_name == "ovseg":
+            kwargs.setdefault("threshold", 0.0)
+            kwargs.setdefault("mask_threshold", 0.5)
+        elif task_name in ("refseg", "reaseg"):
+            kwargs.setdefault("mask_threshold", 0.5)
 
         # 与评测 DataLoader 中 sampled_labels 对齐：open_cls 下 pred 的 class 下标对应该顺序的 COCO id
         vis_sampled_labels = None
@@ -1150,16 +1152,23 @@ class XSamDemo:
             input_length = input_ids[0].shape[0]
             output_length = output_ids[0].shape[0]
 
-            generated_length = output_length - input_length
+            # inputs_embeds 推理时 generate 常只返回新生成 token（不含 prompt）。
+            # 仅当 sequences 前缀确实等于 input_ids 时才按 prompt 长度切片，避免截断回答开头。
+            has_prompt_prefix = False
+            if output_length > input_length:
+                prompt_ids = input_ids[0].to(device=output_ids.device, dtype=output_ids.dtype)
+                has_prompt_prefix = bool(torch.equal(output_ids[0][:input_length], prompt_ids))
+
+            generated_length = (output_length - input_length) if has_prompt_prefix else output_length
             if generated_length < 10:
                 print_log(
                     f"Warning: {task_name} generated only {generated_length} tokens "
-                    f"(input: {input_length}, output: {output_length}). "
+                    f"(input: {input_length}, output: {output_length}, has_prompt_prefix={has_prompt_prefix}). "
                     f"This may indicate early stopping. Full output: {self.tokenizer.decode(output_ids[0], skip_special_tokens=False)[:200]}",
                     logger="current",
                 )
 
-            if output_length > input_length:
+            if has_prompt_prefix:
                 generated_ids = output_ids[0][input_length:]
                 generation_output = self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
             else:
